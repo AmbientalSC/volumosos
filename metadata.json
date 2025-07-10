@@ -1,0 +1,7 @@
+{
+  "name": "Registro Fotográfico Geo",
+  "description": "Um aplicativo para capturar fotos com sua localização, data e hora correspondentes. Ele lista todas as entradas e permite a geração de um relatório.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
