@@ -156,23 +156,35 @@ const App: React.FC = () => {
   };
 
   const simplifyAddress = (fullAddress: string): string => {
-    // Se o endereço for muito longo, pegar apenas as partes principais
     const parts = fullAddress.split(', ');
-    
-    // Se tiver menos de 3 partes, retornar como está
-    if (parts.length <= 3) {
-      return fullAddress;
+    if (parts.length < 3) return fullAddress;
+
+    // Tenta identificar padrão: número, rua, bairro
+    // Exemplo comum: "28, Rua Agostinho José Cognaco, Costa e Silva, ..."
+    let rua = '', numero = '', bairro = '';
+
+    // Se o primeiro for número e o segundo começar com "Rua" ou "Avenida"...
+    if (/^\d+$/.test(parts[0]) && /^(Rua|Avenida|Travessa|Estrada|Alameda|Rodovia|Praça|R\. |Av\.)/i.test(parts[1])) {
+      numero = parts[0];
+      rua = parts[1];
+      bairro = parts[2];
+    } else if (/^(Rua|Avenida|Travessa|Estrada|Alameda|Rodovia|Praça|R\. |Av\.)/i.test(parts[0]) && /^\d+$/.test(parts[1])) {
+      // Se o primeiro for rua e o segundo número
+      rua = parts[0];
+      numero = parts[1];
+      bairro = parts[2];
+    } else {
+      // fallback: usa as três primeiras partes
+      rua = parts[0];
+      numero = '';
+      bairro = parts[1];
     }
-    
-    // Pegar apenas as primeiras 3 partes (geralmente: rua, cidade, estado/país)
-    const simplified = parts.slice(0, 3).join(', ');
-    
-    // Se ainda estiver muito longo, pegar apenas as 2 primeiras
-    if (simplified.length > 80) {
-      return parts.slice(0, 2).join(', ');
-    }
-    
-    return simplified;
+
+    // Monta no formato: Rua, Número, Bairro
+    let endereco = rua;
+    if (numero) endereco += ', ' + numero;
+    endereco += ', ' + bairro;
+    return endereco;
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -307,13 +319,16 @@ const App: React.FC = () => {
     }
     if (filteredRecords.length === 0) { alert("Nenhum registro encontrado para o período selecionado."); return; }
     
-    const headers = ['Data', 'Hora', 'Endereço', 'URL da Imagem'];
+    // Cabeçalho: Data;Local;LINK PARA A IMAGEM
+    const headers = ['Data', 'Local', 'LINK PARA A IMAGEM'];
     const rows = filteredRecords.map(record => {
-        const { date, time } = formatDateTime(record.timestamp);
-        const address = `"${record.address.replace(/"/g, '""')}"`;
-        return [date, time, address, record.imageUrl].join(',');
+        const { date } = formatDateTime(record.timestamp);
+        const local = record.address.replace(/;/g, ','); // Evita quebrar coluna
+        // Hiperlink Excel: =HYPERLINK("url";"Clique aqui")
+        const link = `${record.imageUrl}`;
+        return [date, local, link].join(';');
     });
-    const csvContent = "\uFEFF" + [headers.join(','), ...rows].join('\n');
+    const csvContent = "\uFEFF" + [headers.join(';'), ...rows].join('\n');
     const link = document.createElement('a');
     link.href = URL.createObjectURL(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }));
     link.download = 'relatorio_fotos.csv';
@@ -326,19 +341,17 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-slate-50 text-slate-800">
       <header className="bg-white shadow-md sticky top-0 z-20">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex flex-col items-center space-y-6">
-            <h1 className="text-2xl sm:text-3xl font-bold text-teal-600 tracking-tight text-center">Controle de Volumosos - BC</h1>
-            <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
-              <div className="flex items-center gap-2">
-                <label htmlFor="startDate" className="text-sm font-medium text-slate-600 flex-shrink-0">De:</label>
-                <input type="date" id="startDate" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm" aria-label="Data inicial do filtro"/>
-              </div>
-              <div className="flex items-center gap-2">
-                <label htmlFor="endDate" className="text-sm font-medium text-slate-600 flex-shrink-0">Até:</label>
-                <input type="date" id="endDate" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm" aria-label="Data final do filtro"/>
-              </div>
-              <button onClick={generateCSV} disabled={records.length === 0} className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors">Gerar Relatório</button>
+          <h1 className="text-2xl sm:text-3xl font-bold text-teal-600 tracking-tight text-center mb-4">Controle de Volumosos - BC</h1>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 sm:gap-4 w-full max-w-xl mx-auto">
+            <div className="flex items-center gap-2">
+              <label htmlFor="startDate" className="text-sm font-medium text-slate-600 flex-shrink-0">De:</label>
+              <input type="date" id="startDate" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm" aria-label="Data inicial do filtro"/>
             </div>
+            <div className="flex items-center gap-2">
+              <label htmlFor="endDate" className="text-sm font-medium text-slate-600 flex-shrink-0">Até:</label>
+              <input type="date" id="endDate" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm" aria-label="Data final do filtro"/>
+            </div>
+            <button onClick={generateCSV} disabled={records.length === 0} className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors">Gerar Relatório</button>
           </div>
         </div>
       </header>
@@ -365,7 +378,17 @@ const App: React.FC = () => {
       {viewingImage && (
         <div className="fixed inset-0 bg-black bg-opacity-80 z-50 flex justify-center items-center" onClick={() => setViewingImage(null)}>
           <button onClick={() => setViewingImage(null)} className="absolute top-4 right-4 text-white hover:text-gray-300 z-50"><XIcon className="h-10 w-10" /></button>
-          <img src={viewingImage} alt="Visualização ampliada" className="max-w-full max-h-full object-contain p-4" />
+          <img 
+            src={viewingImage} 
+            alt="Visualização ampliada" 
+            className="bg-white rounded-lg shadow-lg border border-slate-200 object-contain p-2
+              w-[90vw] h-auto max-w-xs sm:max-w-md md:max-w-lg lg:max-w-xl xl:max-w-2xl
+              max-h-[60vh] sm:max-h-[70vh] md:max-h-[80vh]"
+            style={{
+              boxShadow: '0 2px 16px rgba(0,0,0,0.15)',
+              border: '1px solid #e2e8f0',
+            }}
+          />
         </div>
       )}
 
@@ -459,7 +482,14 @@ const App: React.FC = () => {
                 {...longPressHandlers}
                 className="bg-white rounded-xl shadow-lg overflow-hidden transition-transform duration-300 hover:shadow-xl hover:-translate-y-1 flex flex-col sm:flex-row cursor-pointer select-none"
               >
-                <img src={record.imageUrl} alt="Momento capturado" className="w-full sm:w-1/3 h-64 sm:h-auto object-cover" loading="lazy" />
+                <img 
+                  src={record.imageUrl} 
+                  alt="Momento capturado" 
+                  className="object-cover rounded-md border border-slate-200 shadow-sm
+                    w-full max-w-[120px] max-h-[90px] sm:max-w-[120px] sm:max-h-[90px]
+                    h-auto m-2 bg-white"
+                  loading="lazy" 
+                />
                 <div className="p-5 flex flex-col flex-grow">
                   <div className="flex-grow">
                     <div className="flex items-start gap-3 mb-3"><LocationMarkerIcon className="h-6 w-6 text-teal-500 flex-shrink-0 mt-1" /><p className="text-slate-700 font-medium">{record.address}</p></div>
