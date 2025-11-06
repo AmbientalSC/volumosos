@@ -9,13 +9,13 @@ import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 // Your web app's Firebase configuration
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "AIzaSyBXyIEcFNt6q0dIxlEyxnq-leNRdA17Cls",
-  authDomain: "volumosos-d81a1.firebaseapp.com",
-  projectId: "volumosos-d81a1",
-  storageBucket: "volumosos-d81a1.firebasestorage.app",
-  messagingSenderId: "737889001008",
-  appId: "1:737889001008:web:d02789a273994e951957f5",
-  measurementId: "G-42YK47YXD2"
+  apiKey: "AIzaSyD4QSOz87-naWSPKkQCjEjlFEgWkHdczgc",
+  authDomain: "volumosos-d6369.firebaseapp.com",
+  projectId: "volumosos-d6369",
+  storageBucket: "volumosos-d6369.firebasestorage.app",
+  messagingSenderId: "371995611667",
+  appId: "1:371995611667:web:4d5b246de19d62733f25e6",
+  measurementId: "G-B4Z0JLDE85"
 };
 
 // Initialize Firebase
