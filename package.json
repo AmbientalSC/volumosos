@@ -6,16 +6,24 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:native": "vite build --mode native",
     "preview": "vite preview",
-    "deploy": "npm run build && git add dist -f && git commit -m 'deploy' && git subtree push --prefix dist origin gh-pages"
+    "deploy": "npm run build && git add dist -f && git commit -m 'deploy' && git subtree push --prefix dist origin gh-pages",
+    "android:sync": "npm run build:native && npx cap sync android",
+    "android:open": "npx cap open android",
+    "android:run": "npm run build:native && npx cap run android"
   },
   "dependencies": {
+    "@capacitor/android": "^7.4.4",
+    "@capacitor/geolocation": "^7.1.5",
+    "firebase": "^11.10.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "firebase": "^11.10.0",
     "uuid": "9.0.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^7.4.4",
+    "@capacitor/core": "^7.4.4",
     "@types/node": "^22.14.0",
     "@types/react": "^18.3.12",
     "@types/uuid": "^9.0.8",

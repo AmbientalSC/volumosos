@@ -3,8 +3,12 @@ import { defineConfig, loadEnv } from 'vite';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    // Quando gerar build nativo (Capacitor), precisamos de paths relativos para evitar tela branca
+    // Use: `vite build --mode native` ou defina VITE_NATIVE=true
+    const isNative = mode === 'native' || env.VITE_NATIVE === 'true' || env.CAPACITOR === 'true';
     return {
-      base: '/volumosos/',
+      // Web (GitHub Pages): '/volumosos/' | Nativo (Capacitor): './'
+      base: isNative ? './' : '/volumosos/',
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)

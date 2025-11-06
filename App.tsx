@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { Geolocation } from '@capacitor/geolocation';
 import { db, storage, auth, signInAnonymouslyAsync, checkAuthState } from './firebase';
 import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
@@ -28,6 +30,8 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastErrorDetails, setLastErrorDetails] = useState<string | null>(null);
+  const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -44,6 +48,7 @@ const App: React.FC = () => {
   
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [showReportFilters, setShowReportFilters] = useState(false);
 
   const [pendingRecords, setPendingRecords] = useState<PendingRecord[]>([]);
 
@@ -80,6 +85,21 @@ const App: React.FC = () => {
     authenticateUser();
 
     return () => unsubscribe();
+  }, []);
+
+  // Em ambiente nativo (Android/iOS), solicitar permissão de localização no início
+  useEffect(() => {
+    const requestLocationPermission = async () => {
+      try {
+        if (Capacitor.isNativePlatform()) {
+          await Geolocation.requestPermissions();
+          console.log('Permissão de localização solicitada (nativo)');
+        }
+      } catch (e) {
+        console.warn('Falha ao solicitar permissão de localização:', e);
+      }
+    };
+    requestLocationPermission();
   }, []);
 
   useEffect(() => {
@@ -161,6 +181,15 @@ const App: React.FC = () => {
     return () => window.removeEventListener('online', handleOnline);
   }, [isAuthenticated, pendingRecords.length]);
 
+  // Promise com timeout para evitar travas indefinidas (rede lenta/offline)
+  const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      const id = setTimeout(() => reject(new Error('Tempo esgotado ao enviar. Verifique a conexão.')), ms);
+      promise.then((value) => { clearTimeout(id); resolve(value); })
+             .catch((err) => { clearTimeout(id); reject(err); });
+    });
+  };
+
   const saveRecord = async (base64: string, address: string, timestamp: Date) => {
     setIsSubmitting(true);
     setError(null);
@@ -168,24 +197,31 @@ const App: React.FC = () => {
       console.log("Iniciando upload da imagem...");
       const blob = fromBase64(base64);
       const file = new File([blob], 'image.jpg', { type: 'image/jpeg' });
-      const imageRef = ref(storage, `images/${uuidv4()}-${file.name}`);
-      const snapshot = await uploadBytes(imageRef, file);
-      console.log("Imagem enviada com sucesso");
-      const imageUrl = await getDownloadURL(snapshot.ref);
-      console.log("URL da imagem obtida:", imageUrl);
+      await withTimeout((async () => {
+        const imageRef = ref(storage, `images/${uuidv4()}-${file.name}`);
+        const snapshot = await uploadBytes(imageRef, file);
+        console.log("Imagem enviada com sucesso");
+        const imageUrl = await getDownloadURL(snapshot.ref);
+        console.log("URL da imagem obtida:", imageUrl);
 
-      console.log("Salvando registro no Firestore...");
-      await addDoc(collection(db, "records"), {
-        imageUrl,
-        address,
-        timestamp: Timestamp.fromDate(timestamp),
-      });
-      console.log("Registro salvo com sucesso no Firestore");
+        console.log("Salvando registro no Firestore...");
+        await addDoc(collection(db, "records"), {
+          imageUrl,
+          address,
+          timestamp: Timestamp.fromDate(timestamp),
+        });
+        console.log("Registro salvo com sucesso no Firestore");
+      })(), 20000); // 20s de timeout total
     } catch (err) {
       console.error("Error saving record:", err);
       console.error("Código do erro:", (err as any).code);
       console.error("Mensagem do erro:", (err as any).message);
       setError("Falha ao salvar o registro. Armazenado localmente para sincronização posterior.");
+      try {
+        const code = (err as any)?.code || 'unknown';
+        const message = (err as any)?.message || String(err);
+        setLastErrorDetails(`saveRecord failed\ncode: ${code}\nmessage: ${message}`);
+      } catch {}
       throw err; // Re-throw para capturar no caller
     } finally {
       setIsSubmitting(false);
@@ -223,6 +259,20 @@ const App: React.FC = () => {
     return fullAddress;
   };
 
+  // Helper para obter latitude/longitude em web ou nativo
+  const getLatLon = async (): Promise<{ latitude: number; longitude: number }> => {
+    if (Capacitor.isNativePlatform()) {
+      const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000 });
+      return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+    }
+    const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, {
+        enableHighAccuracy: true, timeout: 8000, maximumAge: 0,
+      });
+    });
+    return { latitude: position.coords.latitude, longitude: position.coords.longitude };
+  };
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -239,12 +289,7 @@ const App: React.FC = () => {
     const timestamp = new Date();
     try {
       const base64 = await toBase64(file);
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-          navigator.geolocation.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: true, timeout: 8000, maximumAge: 0,
-          });
-      });
-      const { latitude, longitude } = position.coords;
+    const { latitude, longitude } = await getLatLon();
       const address = await fetchAddress(latitude, longitude);
       try {
         await saveRecord(base64, address, timestamp);
@@ -252,6 +297,11 @@ const App: React.FC = () => {
         console.error('Upload falhou, armazenando localmente:', uploadErr);
         setPendingRecords(prev => [...prev, { base64, address, timestamp }]);
         setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
+        try {
+          const code = (uploadErr as any)?.code || 'unknown';
+          const message = (uploadErr as any)?.message || String(uploadErr);
+          setLastErrorDetails(`handleFileChange/saveRecord catch\ncode: ${code}\nmessage: ${message}`);
+        } catch {}
       }
     } catch (geoErr) {
         let message = 'Erro de localização desconhecido.';
@@ -301,7 +351,7 @@ const App: React.FC = () => {
           }));
           
           setAddressSuggestions(simplifiedSuggestions);
-      } catch (err) { console.error(err); setAddressSuggestions([]); } 
+    } catch (err) { console.error(err); setAddressSuggestions([]); } 
       finally { setIsGeocoding(false); }
   };
 
@@ -337,20 +387,21 @@ const App: React.FC = () => {
     
     setIsSubmitting(true);
     try {
-      // Extrair o nome do arquivo da URL do Storage
+      // Use a URL completa diretamente para obter a referência do Storage
+      // (o SDK aceita https:// e gs://). Se não existir, ignoramos o erro.
       const imageUrl = recordToDelete.imageUrl;
-      const imagePath = imageUrl.split('/o/')[1]?.split('?')[0];
-      
-      if (imagePath) {
-        // Decodificar o caminho da URL
-        const decodedPath = decodeURIComponent(imagePath);
-        const imageRef = ref(storage, decodedPath);
-        
-        // Deletar a imagem do Storage
+      try {
+        const imageRef = ref(storage, imageUrl);
         await deleteObject(imageRef);
         console.log("Imagem deletada do Storage");
+      } catch (e: any) {
+        if (e?.code === 'storage/object-not-found') {
+          console.warn('Imagem não encontrada no Storage, prosseguindo com exclusão do Firestore.');
+        } else {
+          console.warn('Falha ao deletar imagem do Storage, prosseguindo mesmo assim:', e);
+        }
       }
-      
+
       // Deletar o documento do Firestore
       await deleteDoc(doc(db, "records", recordToDelete.id));
       console.log("Registro deletado do Firestore");
@@ -430,6 +481,11 @@ const App: React.FC = () => {
         console.log('Registro pendente sincronizado com sucesso');
       } catch (err) {
         console.error('Falha ao sincronizar registro pendente:', err);
+        try {
+          const code = (err as any)?.code || 'unknown';
+          const message = (err as any)?.message || String(err);
+          setLastErrorDetails(`syncPendingRecords item failed\ncode: ${code}\nmessage: ${message}`);
+        } catch {}
         remaining.push(record);
       }
     }
@@ -441,17 +497,59 @@ const App: React.FC = () => {
       <header className="bg-white shadow-md sticky top-0 z-20">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <h1 className="text-2xl sm:text-3xl font-bold text-teal-600 tracking-tight text-center mb-4">Controle de Volumosos - BC</h1>
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 sm:gap-4 w-full max-w-xl mx-auto">
-            <div className="flex items-center gap-2">
-              <label htmlFor="startDate" className="text-sm font-medium text-slate-600 flex-shrink-0">De:</label>
-              <input type="date" id="startDate" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm" aria-label="Data inicial do filtro"/>
-            </div>
-            <div className="flex items-center gap-2">
-              <label htmlFor="endDate" className="text-sm font-medium text-slate-600 flex-shrink-0">Até:</label>
-              <input type="date" id="endDate" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="px-2 py-1 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm" aria-label="Data final do filtro"/>
-            </div>
-            <button onClick={generateCSV} disabled={records.length === 0} className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors">Gerar Relatório</button>
+          
+          {/* Botão recolhível para mostrar filtros */}
+          <div className="flex justify-center mb-3">
+            <button 
+              onClick={() => setShowReportFilters(!showReportFilters)}
+              className="px-4 py-2 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-400 transition-colors flex items-center gap-2"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <span>{showReportFilters ? 'Ocultar Relatório' : 'Gerar Relatório'}</span>
+              <svg xmlns="http://www.w3.org/2000/svg" className={`h-4 w-4 transition-transform ${showReportFilters ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
           </div>
+
+          {/* Painel de filtros (recolhível) */}
+          {showReportFilters && (
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 max-w-xl mx-auto">
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="startDate" className="text-sm font-medium text-slate-600">De:</label>
+                  <input 
+                    type="date" 
+                    id="startDate" 
+                    value={startDate} 
+                    onChange={(e) => setStartDate(e.target.value)} 
+                    className="px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm w-full" 
+                    aria-label="Data inicial do filtro"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="endDate" className="text-sm font-medium text-slate-600">Até:</label>
+                  <input 
+                    type="date" 
+                    id="endDate" 
+                    value={endDate} 
+                    onChange={(e) => setEndDate(e.target.value)} 
+                    className="px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm w-full" 
+                    aria-label="Data final do filtro"
+                  />
+                </div>
+              </div>
+              <button 
+                onClick={generateCSV} 
+                disabled={records.length === 0} 
+                className="w-full px-4 py-2.5 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+              >
+                Gerar Relatório
+              </button>
+            </div>
+          )}
         </div>
       </header>
       
@@ -523,7 +621,38 @@ const App: React.FC = () => {
           <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           {isSubmitting && <div className="flex flex-col items-center justify-center mt-6 text-slate-600"><Spinner /><p className="mt-2 font-medium">Enviando registro...</p></div>}
-          {error && <p className="mt-4 text-center text-red-600 bg-red-100 p-3 rounded-lg">{error}</p>}
+          {error && (
+            <div className="mt-4 text-center text-red-600 bg-red-100 p-3 rounded-lg">
+              <p>{error}</p>
+              {lastErrorDetails && (
+                <div className="mt-2 text-left">
+                  <button
+                    type="button"
+                    onClick={() => setShowErrorDetails(s => !s)}
+                    className="text-sm text-red-700 underline"
+                  >
+                    {showErrorDetails ? 'Ocultar detalhes' : 'Mostrar detalhes do erro'}
+                  </button>
+                  {showErrorDetails && (
+                    <div className="mt-2 bg-white text-slate-700 border border-red-200 rounded p-2 overflow-auto max-h-40">
+                      <pre className="text-xs whitespace-pre-wrap break-words">{lastErrorDetails}</pre>
+                      <div className="mt-2 text-right">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try { await navigator.clipboard.writeText(lastErrorDetails); } catch {}
+                          }}
+                          className="text-xs px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
+                        >
+                          Copiar
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           {pendingRecords.length > 0 && (
             <div className="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
               <p className="text-yellow-800 text-sm">📶 {pendingRecords.length} registro(s) aguardando sincronização (sem conexão).</p>

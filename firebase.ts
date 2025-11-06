@@ -12,6 +12,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyD4QSOz87-naWSPKkQCjEjlFEgWkHdczgc",
   authDomain: "volumosos-d6369.firebaseapp.com",
   projectId: "volumosos-d6369",
+  // Bucket correto confirmado via gsutil ls
   storageBucket: "volumosos-d6369.firebasestorage.app",
   messagingSenderId: "371995611667",
   appId: "1:371995611667:web:4d5b246de19d62733f25e6",
