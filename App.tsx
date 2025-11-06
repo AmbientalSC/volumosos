@@ -3,7 +3,7 @@ import { db, storage, auth, signInAnonymouslyAsync, checkAuthState } from './fir
 import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { v4 as uuidv4 } from 'uuid';
-import { PhotoRecord } from './types';
+import { PhotoRecord, PendingRecord } from './types';
 import { CameraIcon, LocationMarkerIcon, CalendarIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
 import Spinner from './components/Spinner';
 import Modal from './components/Modal';
@@ -36,7 +36,7 @@ const App: React.FC = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [recordToDelete, setRecordToDelete] = useState<PhotoRecord | null>(null);
 
-  const [pendingRecord, setPendingRecord] = useState<{ imageFile: File; timestamp: Date } | null>(null);
+    const [pendingRecord, setPendingRecord] = useState<{ base64: string; timestamp: Date } | null>(null);
   const [manualAddress, setManualAddress] = useState('');
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -45,9 +45,12 @@ const App: React.FC = () => {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
+  const [pendingRecords, setPendingRecords] = useState<PendingRecord[]>([]);
+
   const fileInputCameraRef = useRef<HTMLInputElement>(null);
   const fileInputGalleryRef = useRef<HTMLInputElement>(null);
   const debounceTimeoutRef = useRef<number | null>(null);
+  const isSyncingRef = useRef(false);
 
   // Autenticação anônima
   useEffect(() => {
@@ -115,13 +118,58 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, [isAuthenticated]);
 
-  const saveRecord = async (imageFile: File, address: string, timestamp: Date) => {
+  // Carregar registros pendentes do localStorage
+  useEffect(() => {
+    const stored = localStorage.getItem('pendingRecords');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        setPendingRecords(parsed.map((p: any) => ({ ...p, timestamp: new Date(p.timestamp) })));
+      } catch (e) {
+        console.error('Erro ao carregar registros pendentes:', e);
+      }
+    }
+  }, []);
+
+  // Salvar registros pendentes no localStorage
+  useEffect(() => {
+    localStorage.setItem('pendingRecords', JSON.stringify(pendingRecords));
+  }, [pendingRecords]);
+
+  // Sincronização automática quando online ou quando há pendentes
+  useEffect(() => {
+    if (!isSyncingRef.current && pendingRecords.length > 0 && navigator.onLine && isAuthenticated) {
+      isSyncingRef.current = true;
+      syncPendingRecords().finally(() => {
+        isSyncingRef.current = false;
+      });
+    }
+  }, [isAuthenticated, pendingRecords.length]);
+
+  // Listener para quando volta online
+  useEffect(() => {
+    const handleOnline = () => {
+      console.log('Conexão detectada, tentando sincronizar registros pendentes...');
+      if (!isSyncingRef.current && pendingRecords.length > 0 && isAuthenticated) {
+        isSyncingRef.current = true;
+        syncPendingRecords().finally(() => {
+          isSyncingRef.current = false;
+        });
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [isAuthenticated, pendingRecords.length]);
+
+  const saveRecord = async (base64: string, address: string, timestamp: Date) => {
     setIsSubmitting(true);
     setError(null);
     try {
       console.log("Iniciando upload da imagem...");
-      const imageRef = ref(storage, `images/${uuidv4()}-${imageFile.name}`);
-      const snapshot = await uploadBytes(imageRef, imageFile);
+      const blob = fromBase64(base64);
+      const file = new File([blob], 'image.jpg', { type: 'image/jpeg' });
+      const imageRef = ref(storage, `images/${uuidv4()}-${file.name}`);
+      const snapshot = await uploadBytes(imageRef, file);
       console.log("Imagem enviada com sucesso");
       const imageUrl = await getDownloadURL(snapshot.ref);
       console.log("URL da imagem obtida:", imageUrl);
@@ -137,7 +185,8 @@ const App: React.FC = () => {
       console.error("Error saving record:", err);
       console.error("Código do erro:", (err as any).code);
       console.error("Mensagem do erro:", (err as any).message);
-      setError("Falha ao salvar o registro. Tente novamente.");
+      setError("Falha ao salvar o registro. Armazenado localmente para sincronização posterior.");
+      throw err; // Re-throw para capturar no caller
     } finally {
       setIsSubmitting(false);
     }
@@ -150,41 +199,28 @@ const App: React.FC = () => {
     if (!response.ok) throw new Error('Falha ao buscar endereço a partir das coordenadas.');
     const data = await response.json();
     
-    // Simplificar o endereço
-    const fullAddress = data.display_name || 'Endereço não encontrado.';
+    // Usar campos estruturados do address para melhor precisão
+    const addr = data.address || {};
+    const rua = addr.road || addr.pedestrian || addr.path || addr.cycleway || '';
+    const numero = addr.house_number || '';
+    const bairro = addr.suburb || addr.neighbourhood || addr.village || '';
+    const referencia = addr.amenity || addr.shop || addr.office || addr.building || '';
+    
+    // Montar endereço priorizando rua, número, bairro, referência
+    const parts = [];
+    if (rua) parts.push(rua);
+    if (numero) parts.push(numero);
+    if (bairro) parts.push(bairro);
+    if (referencia) parts.push(`(${referencia})`);
+    
+    const fullAddress = parts.join(', ') || data.display_name || 'Endereço não encontrado.';
     return simplifyAddress(fullAddress);
   };
 
   const simplifyAddress = (fullAddress: string): string => {
-    const parts = fullAddress.split(', ');
-    if (parts.length < 3) return fullAddress;
-
-    // Tenta identificar padrão: número, rua, bairro
-    // Exemplo comum: "28, Rua Agostinho José Cognaco, Costa e Silva, ..."
-    let rua = '', numero = '', bairro = '';
-
-    // Se o primeiro for número e o segundo começar com "Rua" ou "Avenida"...
-    if (/^\d+$/.test(parts[0]) && /^(Rua|Avenida|Travessa|Estrada|Alameda|Rodovia|Praça|R\. |Av\.)/i.test(parts[1])) {
-      numero = parts[0];
-      rua = parts[1];
-      bairro = parts[2];
-    } else if (/^(Rua|Avenida|Travessa|Estrada|Alameda|Rodovia|Praça|R\. |Av\.)/i.test(parts[0]) && /^\d+$/.test(parts[1])) {
-      // Se o primeiro for rua e o segundo número
-      rua = parts[0];
-      numero = parts[1];
-      bairro = parts[2];
-    } else {
-      // fallback: usa as três primeiras partes
-      rua = parts[0];
-      numero = '';
-      bairro = parts[1];
-    }
-
-    // Monta no formato: Rua, Número, Bairro
-    let endereco = rua;
-    if (numero) endereco += ', ' + numero;
-    endereco += ', ' + bairro;
-    return endereco;
+    // Como agora usamos campos estruturados, o endereço já está simplificado
+    // Apenas remover duplicatas ou ajustar se necessário
+    return fullAddress;
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -202,6 +238,7 @@ const App: React.FC = () => {
 
     const timestamp = new Date();
     try {
+      const base64 = await toBase64(file);
       const position = await new Promise<GeolocationPosition>((resolve, reject) => {
           navigator.geolocation.getCurrentPosition(resolve, reject, {
               enableHighAccuracy: true, timeout: 8000, maximumAge: 0,
@@ -209,7 +246,13 @@ const App: React.FC = () => {
       });
       const { latitude, longitude } = position.coords;
       const address = await fetchAddress(latitude, longitude);
-      await saveRecord(file, address, timestamp);
+      try {
+        await saveRecord(base64, address, timestamp);
+      } catch (uploadErr) {
+        console.error('Upload falhou, armazenando localmente:', uploadErr);
+        setPendingRecords(prev => [...prev, { base64, address, timestamp }]);
+        setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
+      }
     } catch (geoErr) {
         let message = 'Erro de localização desconhecido.';
         if (geoErr instanceof GeolocationPositionError) {
@@ -226,7 +269,13 @@ const App: React.FC = () => {
         }
         console.error("Geolocation failed:", geoErr);
         setGeoError(message);
-        setPendingRecord({ imageFile: file, timestamp });
+        try {
+          const base64 = await toBase64(file);
+          setPendingRecord({ base64, timestamp });
+        } catch (base64Err) {
+          console.error("Erro ao converter para base64:", base64Err);
+          setError("Erro ao processar a imagem.");
+        }
         setIsManualAddressModalOpen(true);
     } finally {
         setIsSubmitting(false);
@@ -268,7 +317,13 @@ const App: React.FC = () => {
   const handleManualAddressSubmit = async () => {
     if (!pendingRecord || !manualAddress) return;
     setIsManualAddressModalOpen(false);
-    await saveRecord(pendingRecord.imageFile, manualAddress, pendingRecord.timestamp);
+    try {
+      await saveRecord(pendingRecord.base64, manualAddress, pendingRecord.timestamp);
+    } catch (err) {
+      // Se falhar, adicionar aos pendentes
+      setPendingRecords(prev => [...prev, { base64: pendingRecord.base64, address: manualAddress, timestamp: pendingRecord.timestamp }]);
+      setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
+    }
     setPendingRecord(null); setManualAddress(''); setAddressSuggestions([]); setGeoError(null);
   };
 
@@ -322,11 +377,18 @@ const App: React.FC = () => {
     // Cabeçalho: Data;Local;LINK PARA A IMAGEM
     const headers = ['Data', 'Local', 'LINK PARA A IMAGEM'];
     const rows = filteredRecords.map(record => {
-        const { date } = formatDateTime(record.timestamp);
+        // Formatar data e hora: dd/mm/aaaa hh:mm
+        const day = record.timestamp.getDate().toString().padStart(2, '0');
+        const month = (record.timestamp.getMonth() + 1).toString().padStart(2, '0');
+        const year = record.timestamp.getFullYear();
+        const hours = record.timestamp.getHours().toString().padStart(2, '0');
+        const minutes = record.timestamp.getMinutes().toString().padStart(2, '0');
+        const dateTime = `${day}/${month}/${year} ${hours}:${minutes}`;
+        
         const local = record.address.replace(/;/g, ','); // Evita quebrar coluna
         // Hiperlink Excel: =HYPERLINK("url";"Clique aqui")
         const link = `${record.imageUrl}`;
-        return [date, local, link].join(';');
+        return [dateTime, local, link].join(';');
     });
     const csvContent = "\uFEFF" + [headers.join(';'), ...rows].join('\n');
     const link = document.createElement('a');
@@ -335,6 +397,43 @@ const App: React.FC = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const toBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+    });
+  };
+
+  const fromBase64 = (base64: string): Blob => {
+    const arr = base64.split(',');
+    const mime = arr[0].match(/:(.*?);/)![1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  };
+
+  const syncPendingRecords = async () => {
+    if (pendingRecords.length === 0 || !isAuthenticated) return;
+    console.log(`Tentando sincronizar ${pendingRecords.length} registros pendentes...`);
+    const remaining: PendingRecord[] = [];
+    for (const record of pendingRecords) {
+      try {
+        await saveRecord(record.base64, record.address, record.timestamp);
+        console.log('Registro pendente sincronizado com sucesso');
+      } catch (err) {
+        console.error('Falha ao sincronizar registro pendente:', err);
+        remaining.push(record);
+      }
+    }
+    setPendingRecords(remaining);
   };
 
   return (
@@ -425,6 +524,11 @@ const App: React.FC = () => {
           <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           {isSubmitting && <div className="flex flex-col items-center justify-center mt-6 text-slate-600"><Spinner /><p className="mt-2 font-medium">Enviando registro...</p></div>}
           {error && <p className="mt-4 text-center text-red-600 bg-red-100 p-3 rounded-lg">{error}</p>}
+          {pendingRecords.length > 0 && (
+            <div className="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
+              <p className="text-yellow-800 text-sm">📶 {pendingRecords.length} registro(s) aguardando sincronização (sem conexão).</p>
+            </div>
+          )}
         </div>
 
         <div className="space-y-6">
@@ -440,7 +544,7 @@ const App: React.FC = () => {
             const {date, time} = formatDateTime(record.timestamp);
             
             // Função para criar handlers de long press para cada registro
-            const createLongPressHandlers = (recordId: string, imageUrl: string) => {
+            const createLongPressHandlers = (imageUrl: string) => {
               let longPressTimer: NodeJS.Timeout | undefined;
               let isLongPress = false;
               
@@ -474,7 +578,7 @@ const App: React.FC = () => {
               };
             };
             
-            const longPressHandlers = createLongPressHandlers(record.id, record.imageUrl);
+            const longPressHandlers = createLongPressHandlers(record.imageUrl);
             
             return (
               <div 
