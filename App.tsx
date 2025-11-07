@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
-import { db, storage, auth, signInAnonymouslyAsync, checkAuthState } from './firebase';
+import { db, storage, signInAnonymouslyAsync, checkAuthState } from './firebase';
 import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { v4 as uuidv4 } from 'uuid';
@@ -51,6 +51,8 @@ const App: React.FC = () => {
   const [showReportFilters, setShowReportFilters] = useState(false);
 
   const [pendingRecords, setPendingRecords] = useState<PendingRecord[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [compressionStats, setCompressionStats] = useState<{ original: number; compressed: number } | null>(null);
 
   const fileInputCameraRef = useRef<HTMLInputElement>(null);
   const fileInputGalleryRef = useRef<HTMLInputElement>(null);
@@ -190,19 +192,92 @@ const App: React.FC = () => {
     });
   };
 
+  // Função otimizada de compressão de imagem com Canvas
+  const compressImage = async (file: File, maxWidth = 1920, maxHeight = 1080, quality = 0.85): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          // Calcular dimensões mantendo aspect ratio
+          let width = img.width;
+          let height = img.height;
+          
+          if (width > maxWidth || height > maxHeight) {
+            const ratio = Math.min(maxWidth / width, maxHeight / height);
+            width = Math.floor(width * ratio);
+            height = Math.floor(height * ratio);
+          }
+          
+          // Criar canvas e comprimir
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          
+          if (!ctx) {
+            reject(new Error('Falha ao criar contexto do canvas'));
+            return;
+          }
+          
+          // Renderizar com qualidade alta
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(img, 0, 0, width, height);
+          
+          // Converter para blob com compressão
+          canvas.toBlob(
+            (blob) => {
+              if (blob) {
+                console.log(`Imagem comprimida: ${(file.size / 1024).toFixed(1)}KB → ${(blob.size / 1024).toFixed(1)}KB (${Math.round((1 - blob.size / file.size) * 100)}% menor)`);
+                resolve(blob);
+              } else {
+                reject(new Error('Falha ao gerar blob comprimido'));
+              }
+            },
+            'image/jpeg',
+            quality
+          );
+        };
+        img.onerror = () => reject(new Error('Falha ao carregar imagem'));
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = () => reject(new Error('Falha ao ler arquivo'));
+      reader.readAsDataURL(file);
+    });
+  };
+
   const saveRecord = async (base64: string, address: string, timestamp: Date) => {
     setIsSubmitting(true);
     setError(null);
+    setUploadProgress(0);
     try {
       console.log("Iniciando upload da imagem...");
+      setUploadProgress(10);
+      
       const blob = fromBase64(base64);
       const file = new File([blob], 'image.jpg', { type: 'image/jpeg' });
+      const originalSize = file.size;
+      
+      // Comprimir imagem
+      setUploadProgress(20);
+      console.log("Comprimindo imagem...");
+      const compressedBlob = await compressImage(file);
+      setCompressionStats({ original: originalSize, compressed: compressedBlob.size });
+      
+      setUploadProgress(40);
       await withTimeout((async () => {
-        const imageRef = ref(storage, `images/${uuidv4()}-${file.name}`);
-        const snapshot = await uploadBytes(imageRef, file);
+        const imageRef = ref(storage, `images/${uuidv4()}.jpg`);
+        
+        // Upload com progresso simulado
+        setUploadProgress(50);
+        const snapshot = await uploadBytes(imageRef, compressedBlob);
+        setUploadProgress(70);
         console.log("Imagem enviada com sucesso");
+        
         const imageUrl = await getDownloadURL(snapshot.ref);
         console.log("URL da imagem obtida:", imageUrl);
+        setUploadProgress(85);
 
         console.log("Salvando registro no Firestore...");
         await addDoc(collection(db, "records"), {
@@ -210,8 +285,12 @@ const App: React.FC = () => {
           address,
           timestamp: Timestamp.fromDate(timestamp),
         });
+        setUploadProgress(100);
         console.log("Registro salvo com sucesso no Firestore");
-      })(), 20000); // 20s de timeout total
+        
+        // Limpar stats após 3s
+        setTimeout(() => setCompressionStats(null), 3000);
+      })(), 30000); // 30s de timeout para upload comprimido
     } catch (err) {
       console.error("Error saving record:", err);
       console.error("Código do erro:", (err as any).code);
@@ -225,6 +304,7 @@ const App: React.FC = () => {
       throw err; // Re-throw para capturar no caller
     } finally {
       setIsSubmitting(false);
+      setUploadProgress(0);
     }
   };
 
@@ -289,44 +369,58 @@ const App: React.FC = () => {
     const timestamp = new Date();
     try {
       const base64 = await toBase64(file);
-    const { latitude, longitude } = await getLatLon();
-      const address = await fetchAddress(latitude, longitude);
+      
+      // Tentar obter coordenadas GPS (funciona offline)
+      let latitude: number | undefined;
+      let longitude: number | undefined;
       try {
-        await saveRecord(base64, address, timestamp);
-      } catch (uploadErr) {
-        console.error('Upload falhou, armazenando localmente:', uploadErr);
-        setPendingRecords(prev => [...prev, { base64, address, timestamp }]);
-        setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
-        try {
-          const code = (uploadErr as any)?.code || 'unknown';
-          const message = (uploadErr as any)?.message || String(uploadErr);
-          setLastErrorDetails(`handleFileChange/saveRecord catch\ncode: ${code}\nmessage: ${message}`);
-        } catch {}
+        const coords = await getLatLon();
+        latitude = coords.latitude;
+        longitude = coords.longitude;
+      } catch (gpsErr) {
+        console.warn('GPS não disponível no momento:', gpsErr);
+        // GPS falhou, mas continuamos (salvaremos sem coordenadas)
       }
-    } catch (geoErr) {
-        let message = 'Erro de localização desconhecido.';
-        if (geoErr instanceof GeolocationPositionError) {
-          switch (geoErr.code) {
-            case geoErr.PERMISSION_DENIED:
-              message = "Acesso à localização negado. Por favor, habilite a permissão no seu navegador/dispositivo."; break;
-            case geoErr.POSITION_UNAVAILABLE:
-              message = "Informações de localização indisponíveis no momento."; break;
-            case geoErr.TIMEOUT:
-              message = "A requisição de localização expirou. Verifique seu sinal de GPS."; break;
-          }
-        } else if (geoErr instanceof Error) {
-            message = geoErr.message;
-        }
-        console.error("Geolocation failed:", geoErr);
-        setGeoError(message);
+
+      // Se temos coordenadas, tentar geocoding (requer rede)
+      if (latitude !== undefined && longitude !== undefined) {
         try {
-          const base64 = await toBase64(file);
-          setPendingRecord({ base64, timestamp });
-        } catch (base64Err) {
-          console.error("Erro ao converter para base64:", base64Err);
-          setError("Erro ao processar a imagem.");
+          const address = await fetchAddress(latitude, longitude);
+          // Temos endereço, tentar enviar
+          try {
+            await saveRecord(base64, address, timestamp);
+          } catch (uploadErr) {
+            console.error('Upload falhou, armazenando localmente com coordenadas:', uploadErr);
+            setPendingRecords(prev => [...prev, { base64, address, timestamp, latitude, longitude }]);
+            setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
+            try {
+              const code = (uploadErr as any)?.code || 'unknown';
+              const message = (uploadErr as any)?.message || String(uploadErr);
+              setLastErrorDetails(`handleFileChange/saveRecord catch\ncode: ${code}\nmessage: ${message}`);
+            } catch {}
+          }
+        } catch (geocodingErr) {
+          // Geocoding falhou (sem rede), mas temos GPS: salvar com coordenadas para geocoding posterior
+          console.warn('Geocoding falhou (offline), salvando com coordenadas para posterior:', geocodingErr);
+          setPendingRecords(prev => [...prev, { 
+            base64, 
+            address: `GPS: ${latitude.toFixed(6)}, ${longitude.toFixed(6)} (aguardando geocoding)`, 
+            timestamp, 
+            latitude, 
+            longitude 
+          }]);
+          setError("Sem conexão para obter endereço. Coordenadas GPS salvas; endereço será obtido automaticamente quando houver rede.");
         }
+      } else {
+        // Sem GPS: abrir modal para digitar endereço manualmente
+        let message = 'GPS não disponível. Por favor, digite o endereço manualmente.';
+        setGeoError(message);
+        setPendingRecord({ base64, timestamp });
         setIsManualAddressModalOpen(true);
+      }
+    } catch (err) {
+      console.error("Erro ao processar arquivo:", err);
+      setError("Erro ao processar a imagem.");
     } finally {
         setIsSubmitting(false);
         resetInputs();
@@ -475,20 +569,46 @@ const App: React.FC = () => {
     if (pendingRecords.length === 0 || !isAuthenticated) return;
     console.log(`Tentando sincronizar ${pendingRecords.length} registros pendentes...`);
     const remaining: PendingRecord[] = [];
-    for (const record of pendingRecords) {
-      try {
-        await saveRecord(record.base64, record.address, record.timestamp);
-        console.log('Registro pendente sincronizado com sucesso');
-      } catch (err) {
-        console.error('Falha ao sincronizar registro pendente:', err);
-        try {
-          const code = (err as any)?.code || 'unknown';
-          const message = (err as any)?.message || String(err);
-          setLastErrorDetails(`syncPendingRecords item failed\ncode: ${code}\nmessage: ${message}`);
-        } catch {}
-        remaining.push(record);
-      }
+    
+    // Processar até 2 uploads em paralelo para melhor performance
+    const PARALLEL_UPLOADS = 2;
+    for (let i = 0; i < pendingRecords.length; i += PARALLEL_UPLOADS) {
+      const batch = pendingRecords.slice(i, i + PARALLEL_UPLOADS);
+      const results = await Promise.allSettled(
+        batch.map(async (record) => {
+          let finalAddress = record.address;
+          
+          // Se temos coordenadas mas endereço é temporário (GPS raw), fazer geocoding agora
+          if (record.latitude !== undefined && record.longitude !== undefined && record.address.startsWith('GPS:')) {
+            try {
+              console.log(`Fazendo geocoding reverso de coordenadas salvas: ${record.latitude}, ${record.longitude}`);
+              finalAddress = await fetchAddress(record.latitude, record.longitude);
+              console.log(`Endereço obtido via geocoding: ${finalAddress}`);
+            } catch (geocodingErr) {
+              console.warn('Geocoding ainda falhou, mantendo coordenadas:', geocodingErr);
+              throw geocodingErr;
+            }
+          }
+          
+          await saveRecord(record.base64, finalAddress, record.timestamp);
+          console.log('Registro pendente sincronizado com sucesso');
+        })
+      );
+      
+      // Adicionar falhados de volta à fila
+      results.forEach((result, idx) => {
+        if (result.status === 'rejected') {
+          console.error('Falha ao sincronizar registro pendente:', result.reason);
+          try {
+            const code = (result.reason as any)?.code || 'unknown';
+            const message = (result.reason as any)?.message || String(result.reason);
+            setLastErrorDetails(`syncPendingRecords item failed\ncode: ${code}\nmessage: ${message}`);
+          } catch {}
+          remaining.push(batch[idx]);
+        }
+      });
     }
+    
     setPendingRecords(remaining);
   };
 
@@ -620,7 +740,40 @@ const App: React.FC = () => {
           </div>
           <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
-          {isSubmitting && <div className="flex flex-col items-center justify-center mt-6 text-slate-600"><Spinner /><p className="mt-2 font-medium">Enviando registro...</p></div>}
+          
+          {isSubmitting && (
+            <div className="flex flex-col items-center justify-center mt-6 text-slate-600">
+              <Spinner />
+              <p className="mt-2 font-medium">
+                {uploadProgress < 20 ? 'Processando imagem...' :
+                 uploadProgress < 40 ? 'Comprimindo...' :
+                 uploadProgress < 70 ? 'Enviando...' :
+                 uploadProgress < 100 ? 'Finalizando...' : 'Concluído!'}
+              </p>
+              {/* Barra de progresso */}
+              <div className="w-full max-w-xs mt-3 bg-slate-200 rounded-full h-2 overflow-hidden">
+                <div 
+                  className="bg-teal-500 h-full transition-all duration-300 ease-out"
+                  style={{ width: `${uploadProgress}%` }}
+                ></div>
+              </div>
+              {uploadProgress > 0 && (
+                <p className="mt-1 text-sm text-slate-500">{uploadProgress}%</p>
+              )}
+            </div>
+          )}
+          
+          {compressionStats && (
+            <div className="mt-4 p-3 bg-green-100 border border-green-300 rounded-lg text-center">
+              <p className="text-green-800 text-sm">
+                ✅ Imagem otimizada: {(compressionStats.original / 1024).toFixed(1)}KB → {(compressionStats.compressed / 1024).toFixed(1)}KB 
+                <span className="font-semibold ml-1">
+                  ({Math.round((1 - compressionStats.compressed / compressionStats.original) * 100)}% menor)
+                </span>
+              </p>
+            </div>
+          )}
+          
           {error && (
             <div className="mt-4 text-center text-red-600 bg-red-100 p-3 rounded-lg">
               <p>{error}</p>

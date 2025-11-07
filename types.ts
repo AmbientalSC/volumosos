@@ -9,4 +9,7 @@ export interface PendingRecord {
   base64: string;
   address: string;
   timestamp: Date;
+  // Coordenadas para geocoding reverso posterior (quando houver rede)
+  latitude?: number;
+  longitude?: number;
 }
