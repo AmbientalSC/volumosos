@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
-import { db, storage, signInAnonymouslyAsync, checkAuthState } from './firebase';
+import { db, storage, signInAnonymouslyAsync, checkAuthState, auth } from './firebase';
 import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc, limit, getDocs, where } from 'firebase/firestore';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import Dashboard from './components/Dashboard';
 import { v4 as uuidv4 } from 'uuid';
 import { PhotoRecord, PendingRecord } from './types';
 import { CameraIcon, LocationMarkerIcon, CalendarIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
@@ -40,7 +42,15 @@ const App: React.FC = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [recordToDelete, setRecordToDelete] = useState<PhotoRecord | null>(null);
 
-    const [pendingRecord, setPendingRecord] = useState<{ base64: string; timestamp: Date } | null>(null);
+  type ViewState = 'main' | 'login' | 'dashboard';
+  const [currentView, setCurrentView] = useState<ViewState>('main');
+  const [selectedRecord, setSelectedRecord] = useState<PhotoRecord | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const [pendingRecord, setPendingRecord] = useState<{ base64: string; timestamp: Date } | null>(null);
   const [manualAddress, setManualAddress] = useState('');
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -125,6 +135,8 @@ const App: React.FC = () => {
                 address: data.address,
                 imageUrl: data.imageUrl,
                 timestamp: (data.timestamp as Timestamp).toDate(),
+                latitude: data.latitude,
+                longitude: data.longitude,
             });
         });
         setRecords(recordsData);
@@ -248,7 +260,7 @@ const App: React.FC = () => {
     });
   };
 
-  const saveRecord = async (base64: string, address: string, timestamp: Date) => {
+  const saveRecord = async (base64: string, address: string, timestamp: Date, latitude?: number, longitude?: number) => {
     setIsSubmitting(true);
     setError(null);
     setUploadProgress(0);
@@ -285,6 +297,8 @@ const App: React.FC = () => {
           imageUrl,
           address,
           timestamp: Timestamp.fromDate(timestamp),
+          ...(latitude !== undefined && { latitude }),
+          ...(longitude !== undefined && { longitude }),
         });
         setUploadProgress(100);
         console.log("Registro salvo com sucesso no Firestore");
@@ -389,7 +403,7 @@ const App: React.FC = () => {
           const address = await fetchAddress(latitude, longitude);
           // Temos endereço, tentar enviar
           try {
-            await saveRecord(base64, address, timestamp);
+            await saveRecord(base64, address, timestamp, latitude, longitude);
           } catch (uploadErr) {
             console.error('Upload falhou, armazenando localmente com coordenadas:', uploadErr);
             setPendingRecords(prev => [...prev, { base64, address, timestamp, latitude, longitude }]);
@@ -430,6 +444,29 @@ const App: React.FC = () => {
 
   const handleTakePhoto = () => { setIsModalOpen(false); fileInputCameraRef.current?.click(); };
   const handleChooseFromGallery = () => { setIsModalOpen(false); fileInputGalleryRef.current?.click(); };
+
+  const handleAdminLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoggingIn(true);
+    setLoginError(null);
+    try {
+      await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
+      setCurrentView('dashboard');
+      setLoginEmail('');
+      setLoginPassword('');
+    } catch (err: any) {
+      console.error(err);
+      setLoginError('Falha no login. Verifique e-mail e senha.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setCurrentView('main');
+    signInAnonymouslyAsync();
+  };
 
   const fetchAddressSuggestions = async (query: string) => {
       if (query.length < 3) { setAddressSuggestions([]); return; }
@@ -615,7 +652,7 @@ const App: React.FC = () => {
             }
           }
           
-          await saveRecord(record.base64, finalAddress, record.timestamp);
+          await saveRecord(record.base64, finalAddress, record.timestamp, record.latitude, record.longitude);
           console.log('Registro pendente sincronizado com sucesso');
         })
       );
@@ -640,8 +677,30 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
       <header className="bg-white shadow-md sticky top-0 z-20">
-        <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <h1 className="text-2xl sm:text-3xl font-bold text-teal-600 tracking-tight text-center mb-4">Controle de Volumosos - BC</h1>
+        <div className="w-full max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <div className="flex flex-col sm:flex-row justify-between items-center mb-4 gap-4">
+            <div className="w-full sm:w-32 hidden sm:block"></div> {/* Espaçador */}
+            <h1 className="text-2xl sm:text-3xl font-bold text-teal-600 tracking-tight text-center flex-1">Controle de Volumosos - BC</h1>
+            <div className="w-full sm:w-32 flex justify-center sm:justify-end">
+              {!Capacitor.isNativePlatform() && (
+                currentView === 'main' ? (
+                  <button 
+                    onClick={() => setCurrentView('login')}
+                    className="hidden sm:block px-3 py-1.5 text-sm font-medium bg-slate-200 text-slate-700 hover:bg-slate-300 rounded transition-colors"
+                  >
+                    Acesso Restrito
+                  </button>
+                ) : (
+                  <button 
+                    onClick={() => currentView === 'login' ? setCurrentView('main') : handleLogout()}
+                    className="hidden sm:block px-3 py-1.5 text-sm font-medium bg-slate-200 text-slate-700 hover:bg-slate-300 rounded transition-colors"
+                  >
+                    {currentView === 'login' ? 'Voltar ao App' : 'Sair (Logout)'}
+                  </button>
+                )
+              )}
+            </div>
+          </div>
           
           {/* Botão recolhível para mostrar filtros */}
           <div className="flex justify-center mb-3">
@@ -705,66 +764,96 @@ const App: React.FC = () => {
         </div>
       </header>
       
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Adicionar Registro">
-        <div className="space-y-4">
-          <button onClick={handleTakePhoto} className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-teal-500 text-white font-bold rounded-lg shadow-md hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 transition-all"><CameraIcon className="h-6 w-6" /><span>Tirar Foto com a Câmera</span></button>
-          <button onClick={handleChooseFromGallery} className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-indigo-500 text-white font-bold rounded-lg shadow-md hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-opacity-75 transition-all"><ImageIcon className="h-6 w-6" /><span>Escolher da Galeria</span></button>
-        </div>
-      </Modal>
-
-      <Modal isOpen={isManualAddressModalOpen} onClose={() => { setIsManualAddressModalOpen(false); setPendingRecord(null); setManualAddress(''); setAddressSuggestions([]); setGeoError(null); }} title="Endereço não encontrado">
-        <div className="space-y-4">
-          <p className="text-sm text-red-600 bg-red-100 p-3 rounded-lg">{geoError || "Não foi possível obter sua localização. Por favor, digite o endereço manualmente."}</p>
-          <div className="relative">
-            <input type="text" placeholder="Digite o endereço para buscar..." value={manualAddress} onChange={handleManualAddressChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" aria-label="Entrada de endereço manual"/>
-            {isGeocoding && <div className="absolute right-3 top-1/2 -translate-y-1/2"><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-t-2 border-teal-500"></div></div>}
-            {addressSuggestions.length > 0 && <ul className="absolute z-20 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">{addressSuggestions.map((s) => (<li key={s.place_id}><button onClick={() => handleSelectSuggestion(s.display_name)} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-teal-50 transition-colors">{s.display_name}</button></li>))}</ul>}
+      {currentView === 'login' && (
+        <main className="container mx-auto p-4 sm:p-6 lg:p-8 max-w-md">
+          <div className="bg-white p-8 rounded-xl shadow-lg border border-slate-200">
+            <h2 className="text-2xl font-bold text-center text-slate-800 mb-6">Acesso Administrativo</h2>
+            {loginError && <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm">{loginError}</div>}
+            <form onSubmit={handleAdminLogin} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
+                <input type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} required className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
+                <input type="password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:outline-none" />
+              </div>
+              <button type="submit" disabled={isLoggingIn} className="w-full py-3 bg-teal-600 text-white font-bold rounded-lg shadow-md hover:bg-teal-700 disabled:bg-teal-400 transition-colors">
+                {isLoggingIn ? 'Entrando...' : 'Entrar'}
+              </button>
+            </form>
           </div>
-          <button onClick={handleManualAddressSubmit} disabled={!manualAddress.trim() || isSubmitting} className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-teal-500 text-white font-bold rounded-lg shadow-md hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 disabled:bg-teal-300 disabled:cursor-not-allowed transition-colors"><CloudUploadIcon className="h-6 w-6" /><span>{isSubmitting ? 'Enviando...' : 'Confirmar e Salvar'}</span></button>
-        </div>
-      </Modal>
-
-      {viewingImage && (
-        <div className="fixed inset-0 bg-black bg-opacity-80 z-50 flex justify-center items-center" onClick={() => setViewingImage(null)}>
-          <button onClick={() => setViewingImage(null)} className="absolute top-4 right-4 text-white hover:text-gray-300 z-50"><XIcon className="h-10 w-10" /></button>
-          <img 
-            src={viewingImage} 
-            alt="Visualização ampliada" 
-            className="bg-white rounded-lg shadow-lg border border-slate-200 object-contain p-2
-              w-[90vw] h-auto max-w-xs sm:max-w-md md:max-w-lg lg:max-w-xl xl:max-w-2xl
-              max-h-[60vh] sm:max-h-[70vh] md:max-h-[80vh]"
-            style={{
-              boxShadow: '0 2px 16px rgba(0,0,0,0.15)',
-              border: '1px solid #e2e8f0',
-            }}
-          />
-        </div>
+        </main>
       )}
 
-      <Modal isOpen={isDeleteModalOpen} onClose={() => { setIsDeleteModalOpen(false); setRecordToDelete(null); }} title="Confirmar Exclusão">
-        <div className="space-y-4">
-          <p className="text-sm text-red-600 bg-red-100 p-3 rounded-lg">
-            Tem certeza que deseja excluir este registro? Esta ação não pode ser desfeita.
-          </p>
-          <div className="flex gap-3">
-            <button 
-              onClick={() => { setIsDeleteModalOpen(false); setRecordToDelete(null); }} 
-              className="flex-1 px-4 py-2 bg-gray-500 text-white font-semibold rounded-lg hover:bg-gray-600 transition-colors"
-            >
-              Cancelar
-            </button>
-            <button 
-              onClick={handleDeleteRecord} 
-              disabled={isSubmitting}
-              className="flex-1 px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 disabled:bg-red-300 disabled:cursor-not-allowed transition-colors"
-            >
-              {isSubmitting ? 'Excluindo...' : 'Excluir'}
-            </button>
-          </div>
-        </div>
-      </Modal>
+      {currentView === 'dashboard' && (
+        <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8">
+          <Dashboard />
+        </main>
+      )}
 
-      <main className="container mx-auto p-4 sm:p-6 lg:p-8">
+      {currentView === 'main' && (
+        <>
+          <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Adicionar Registro">
+            <div className="space-y-4">
+              <button onClick={handleTakePhoto} className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-teal-500 text-white font-bold rounded-lg shadow-md hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 transition-all"><CameraIcon className="h-6 w-6" /><span>Tirar Foto com a Câmera</span></button>
+              <button onClick={handleChooseFromGallery} className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-indigo-500 text-white font-bold rounded-lg shadow-md hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-opacity-75 transition-all"><ImageIcon className="h-6 w-6" /><span>Escolher da Galeria</span></button>
+            </div>
+          </Modal>
+
+          <Modal isOpen={isManualAddressModalOpen} onClose={() => { setIsManualAddressModalOpen(false); setPendingRecord(null); setManualAddress(''); setAddressSuggestions([]); setGeoError(null); }} title="Endereço não encontrado">
+            <div className="space-y-4">
+              <p className="text-sm text-red-600 bg-red-100 p-3 rounded-lg">{geoError || "Não foi possível obter sua localização. Por favor, digite o endereço manualmente."}</p>
+              <div className="relative">
+                <input type="text" placeholder="Digite o endereço para buscar..." value={manualAddress} onChange={handleManualAddressChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" aria-label="Entrada de endereço manual"/>
+                {isGeocoding && <div className="absolute right-3 top-1/2 -translate-y-1/2"><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-t-2 border-teal-500"></div></div>}
+                {addressSuggestions.length > 0 && <ul className="absolute z-20 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">{addressSuggestions.map((s) => (<li key={s.place_id}><button onClick={() => handleSelectSuggestion(s.display_name)} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-teal-50 transition-colors">{s.display_name}</button></li>))}</ul>}
+              </div>
+              <button onClick={handleManualAddressSubmit} disabled={!manualAddress.trim() || isSubmitting} className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-teal-500 text-white font-bold rounded-lg shadow-md hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 disabled:bg-teal-300 disabled:cursor-not-allowed transition-colors"><CloudUploadIcon className="h-6 w-6" /><span>{isSubmitting ? 'Enviando...' : 'Confirmar e Salvar'}</span></button>
+            </div>
+          </Modal>
+
+          {viewingImage && (
+            <div className="fixed inset-0 bg-black bg-opacity-80 z-50 flex justify-center items-center" onClick={() => setViewingImage(null)}>
+              <button onClick={() => setViewingImage(null)} className="absolute top-4 right-4 text-white hover:text-gray-300 z-50"><XIcon className="h-10 w-10" /></button>
+              <img 
+                src={viewingImage} 
+                alt="Visualização ampliada" 
+                className="bg-white rounded-lg shadow-lg border border-slate-200 object-contain p-2
+                  w-[90vw] h-auto max-w-xs sm:max-w-md md:max-w-lg lg:max-w-xl xl:max-w-2xl
+                  max-h-[60vh] sm:max-h-[70vh] md:max-h-[80vh]"
+                style={{
+                  boxShadow: '0 2px 16px rgba(0,0,0,0.15)',
+                  border: '1px solid #e2e8f0',
+                }}
+              />
+            </div>
+          )}
+
+          <Modal isOpen={isDeleteModalOpen} onClose={() => { setIsDeleteModalOpen(false); setRecordToDelete(null); }} title="Confirmar Exclusão">
+            <div className="space-y-4">
+              <p className="text-sm text-red-600 bg-red-100 p-3 rounded-lg">
+                Tem certeza que deseja excluir este registro? Esta ação não pode ser desfeita.
+              </p>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => { setIsDeleteModalOpen(false); setRecordToDelete(null); }} 
+                  className="flex-1 px-4 py-2 bg-gray-500 text-white font-semibold rounded-lg hover:bg-gray-600 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={handleDeleteRecord} 
+                  disabled={isSubmitting}
+                  className="flex-1 px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 disabled:bg-red-300 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isSubmitting ? 'Excluindo...' : 'Excluir'}
+                </button>
+              </div>
+            </div>
+          </Modal>
+
+          <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8">
         <div className="bg-white p-6 rounded-xl shadow-lg mb-8 border border-slate-200">
           <h2 className="text-xl font-semibold mb-4 text-center">Adicionar um Novo Registro</h2>
           <div className="flex justify-center">
@@ -854,72 +943,113 @@ const App: React.FC = () => {
               <p className="mt-1 text-sm text-slate-500">Clique no botão acima para adicionar seu primeiro registro.</p>
             </div>
           )}
-          {records.map(record => {
-            const {date, time} = formatDateTime(record.timestamp);
-            
-            // Função para criar handlers de long press para cada registro
-            const createLongPressHandlers = (imageUrl: string) => {
-              let longPressTimer: NodeJS.Timeout | undefined;
-              let isLongPress = false;
-              
-              const start = () => {
-                isLongPress = false;
-                longPressTimer = setTimeout(() => {
-                  isLongPress = true;
-                  handleLongPress(record);
-                }, 500);
-              };
-              
-              const stop = () => {
-                if (longPressTimer) {
-                  clearTimeout(longPressTimer);
-                }
-              };
-              
-              const handleClick = () => {
-                if (!isLongPress) {
-                  setViewingImage(imageUrl);
-                }
-              };
-              
-              return {
-                onMouseDown: start,
-                onMouseUp: stop,
-                onMouseLeave: stop,
-                onTouchStart: start,
-                onTouchEnd: stop,
-                onClick: handleClick,
-              };
-            };
-            
-            const longPressHandlers = createLongPressHandlers(record.imageUrl);
-            
-            return (
-              <div 
-                key={record.id} 
-                {...longPressHandlers}
-                className="bg-white rounded-xl shadow-lg overflow-hidden transition-transform duration-300 hover:shadow-xl hover:-translate-y-1 flex flex-col sm:flex-row cursor-pointer select-none"
-              >
-                <img 
-                  src={record.imageUrl} 
-                  alt="Momento capturado" 
-                  className="object-cover rounded-md border border-slate-200 shadow-sm
-                    w-full max-w-[120px] max-h-[90px] sm:max-w-[120px] sm:max-h-[90px]
-                    h-auto m-2 bg-white"
-                  loading="lazy" 
-                />
-                <div className="p-5 flex flex-col flex-grow">
-                  <div className="flex-grow">
-                    <div className="flex items-start gap-3 mb-3"><LocationMarkerIcon className="h-6 w-6 text-teal-500 flex-shrink-0 mt-1" /><p className="text-slate-700 font-medium">{record.address}</p></div>
-                    <div className="flex items-center gap-3"><CalendarIcon className="h-6 w-6 text-teal-500 flex-shrink-0" /><p className="text-slate-600">{date} às {time}</p></div>
-                  </div>
-                   <div className="text-right text-xs text-slate-400 pt-4 mt-auto">ID: {record.id.substring(0, 10)}...</div>
-                </div>
+          {!isLoading && records.length > 0 && (
+            <div className="flex flex-col lg:flex-row gap-6">
+              {/* Lista (Desktop Esquerda / Mobile Central) */}
+              <div className="w-full lg:w-1/3 xl:w-1/4 flex flex-col gap-4 lg:h-[800px] lg:overflow-y-auto lg:pr-2">
+                {records.map(record => {
+                  const {date, time} = formatDateTime(record.timestamp);
+                  
+                  const createLongPressHandlers = (imageUrl: string) => {
+                    let longPressTimer: NodeJS.Timeout | undefined;
+                    let isLongPress = false;
+                    
+                    const start = () => {
+                      isLongPress = false;
+                      longPressTimer = setTimeout(() => {
+                        isLongPress = true;
+                        handleLongPress(record);
+                      }, 500);
+                    };
+                    
+                    const stop = () => {
+                      if (longPressTimer) {
+                        clearTimeout(longPressTimer);
+                      }
+                    };
+                    
+                    const handleClick = () => {
+                      if (!isLongPress) {
+                        if (window.innerWidth >= 1024) {
+                          setSelectedRecord(record);
+                        } else {
+                          setViewingImage(imageUrl);
+                        }
+                      }
+                    };
+                    
+                    return {
+                      onMouseDown: start,
+                      onMouseUp: stop,
+                      onMouseLeave: stop,
+                      onTouchStart: start,
+                      onTouchEnd: stop,
+                      onClick: handleClick,
+                    };
+                  };
+                  
+                  const longPressHandlers = createLongPressHandlers(record.imageUrl);
+                  const isSelected = selectedRecord?.id === record.id;
+                  
+                  return (
+                    <div 
+                      key={record.id} 
+                      {...longPressHandlers}
+                      className={`bg-white rounded-xl shadow-sm overflow-hidden transition-all duration-300 hover:shadow-md cursor-pointer select-none border-2 shrink-0 ${isSelected ? 'border-teal-500 bg-teal-50' : 'border-transparent'}`}
+                    >
+                      {/* Foto aparece apenas no Mobile */}
+                      <img 
+                        src={record.imageUrl} 
+                        alt="Momento capturado" 
+                        className="object-cover w-full h-48 sm:h-56 bg-slate-100 lg:hidden"
+                        loading="lazy" 
+                      />
+                      <div className="p-4 flex flex-col flex-grow">
+                        <div className="flex items-start gap-3 mb-2">
+                          <LocationMarkerIcon className="h-5 w-5 text-teal-500 flex-shrink-0 mt-0.5" />
+                          <p className="text-slate-700 font-medium text-sm leading-tight line-clamp-2">{record.address}</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <CalendarIcon className="h-5 w-5 text-teal-500 flex-shrink-0" />
+                          <p className="text-slate-600 text-xs sm:text-sm">{date} às {time}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-            )
-          })}
+
+              {/* Detalhes (Apenas Desktop) */}
+              <div className="hidden lg:flex w-full lg:w-2/3 xl:w-3/4 flex-col gap-6 h-[800px]">
+                {selectedRecord ? (
+                  <div className="bg-white rounded-xl shadow-md border border-slate-200 p-6 h-full flex flex-col">
+                    <div className="flex-1 flex items-center justify-center overflow-hidden mb-6 bg-slate-50 rounded-lg border border-slate-100">
+                      <img src={selectedRecord.imageUrl} alt="Momento Capturado Expandido" className="max-h-full max-w-full object-contain" />
+                    </div>
+                    <div className="p-5 bg-white rounded-lg border border-slate-200 flex flex-col gap-2 shrink-0 shadow-sm">
+                       <div className="flex items-start gap-3">
+                         <LocationMarkerIcon className="h-6 w-6 text-teal-500 flex-shrink-0 mt-0.5" />
+                         <h3 className="text-lg font-semibold text-slate-800 leading-tight">{selectedRecord.address}</h3>
+                       </div>
+                       <div className="flex justify-between items-center mt-2 pt-3 border-t border-slate-100">
+                         <p className="text-slate-500 text-sm">Registro gerado em {formatDateTime(selectedRecord.timestamp).date} às {formatDateTime(selectedRecord.timestamp).time}</p>
+                         <p className="text-slate-400 text-xs font-mono">ID: {selectedRecord.id}</p>
+                       </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-xl shadow-md border border-slate-200 p-12 flex flex-col items-center justify-center h-full text-slate-500">
+                    <ImageIcon className="h-16 w-16 mb-4 opacity-30" />
+                    <p className="text-lg">Selecione uma coleta na lista ao lado para ver os detalhes</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </main>
+      </>
+      )}
     </div>
   );
 };

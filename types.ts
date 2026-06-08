@@ -3,6 +3,8 @@ export interface PhotoRecord {
   imageUrl: string;
   address: string;
   timestamp: Date;
+  latitude?: number;
+  longitude?: number;
 }
 
 export interface PendingRecord {
