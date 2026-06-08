@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
 import { db, storage, signInAnonymouslyAsync, checkAuthState } from './firebase';
-import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc, limit, getDocs, where } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { v4 as uuidv4 } from 'uuid';
 import { PhotoRecord, PendingRecord } from './types';
@@ -49,6 +49,7 @@ const App: React.FC = () => {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [showReportFilters, setShowReportFilters] = useState(false);
+  const [isGeneratingCSV, setIsGeneratingCSV] = useState(false);
 
   const [pendingRecords, setPendingRecords] = useState<PendingRecord[]>([]);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
@@ -112,7 +113,7 @@ const App: React.FC = () => {
     
     console.log("Usuário autenticado, carregando registros...");
     setIsLoading(true);
-    const q = query(collection(db, "records"), orderBy("timestamp", "desc"));
+    const q = query(collection(db, "records"), orderBy("timestamp", "desc"), limit(50));
     const unsubscribe = onSnapshot(q, 
       (querySnapshot) => {
         console.log("Registros carregados com sucesso:", querySnapshot.size, "documentos");
@@ -510,38 +511,62 @@ const App: React.FC = () => {
     }
   };
 
-  const generateCSV = () => {
-    let filteredRecords = records;
-    if (startDate && endDate) {
-      const start = new Date(startDate); start.setHours(0, 0, 0, 0);
-      const end = new Date(endDate); end.setHours(23, 59, 59, 999);
-      filteredRecords = records.filter(r => r.timestamp >= start && r.timestamp <= end);
+  const generateCSV = async () => {
+    setIsGeneratingCSV(true);
+    try {
+      let q = query(collection(db, "records"), orderBy("timestamp", "desc"));
+      
+      if (startDate && endDate) {
+        const start = new Date(startDate); start.setHours(0, 0, 0, 0);
+        const end = new Date(endDate); end.setHours(23, 59, 59, 999);
+        q = query(
+          collection(db, "records"),
+          where("timestamp", ">=", Timestamp.fromDate(start)),
+          where("timestamp", "<=", Timestamp.fromDate(end)),
+          orderBy("timestamp", "desc")
+        );
+      }
+      
+      const querySnapshot = await getDocs(q);
+      
+      if (querySnapshot.empty) { 
+        alert("Nenhum registro encontrado para o período selecionado."); 
+        return; 
+      }
+      
+      // Cabeçalho: Data;Local;LINK PARA A IMAGEM
+      const headers = ['Data', 'Local', 'LINK PARA A IMAGEM'];
+      const rows = querySnapshot.docs.map(doc => {
+          const data = doc.data();
+          const timestamp = (data.timestamp as Timestamp).toDate();
+          const address = data.address || '';
+          
+          // Formatar data e hora: dd/mm/aaaa hh:mm
+          const day = timestamp.getDate().toString().padStart(2, '0');
+          const month = (timestamp.getMonth() + 1).toString().padStart(2, '0');
+          const year = timestamp.getFullYear();
+          const hours = timestamp.getHours().toString().padStart(2, '0');
+          const minutes = timestamp.getMinutes().toString().padStart(2, '0');
+          const dateTime = `${day}/${month}/${year} ${hours}:${minutes}`;
+          
+          const local = address.replace(/;/g, ','); // Evita quebrar coluna
+          // Hiperlink Excel: =HYPERLINK("url";"Clique aqui")
+          const link = `${data.imageUrl}`;
+          return [dateTime, local, link].join(';');
+      });
+      const csvContent = "\uFEFF" + [headers.join(';'), ...rows].join('\n');
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }));
+      link.download = 'relatorio_fotos.csv';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error("Erro ao gerar relatório:", err);
+      alert("Erro ao buscar dados para o relatório.");
+    } finally {
+      setIsGeneratingCSV(false);
     }
-    if (filteredRecords.length === 0) { alert("Nenhum registro encontrado para o período selecionado."); return; }
-    
-    // Cabeçalho: Data;Local;LINK PARA A IMAGEM
-    const headers = ['Data', 'Local', 'LINK PARA A IMAGEM'];
-    const rows = filteredRecords.map(record => {
-        // Formatar data e hora: dd/mm/aaaa hh:mm
-        const day = record.timestamp.getDate().toString().padStart(2, '0');
-        const month = (record.timestamp.getMonth() + 1).toString().padStart(2, '0');
-        const year = record.timestamp.getFullYear();
-        const hours = record.timestamp.getHours().toString().padStart(2, '0');
-        const minutes = record.timestamp.getMinutes().toString().padStart(2, '0');
-        const dateTime = `${day}/${month}/${year} ${hours}:${minutes}`;
-        
-        const local = record.address.replace(/;/g, ','); // Evita quebrar coluna
-        // Hiperlink Excel: =HYPERLINK("url";"Clique aqui")
-        const link = `${record.imageUrl}`;
-        return [dateTime, local, link].join(';');
-    });
-    const csvContent = "\uFEFF" + [headers.join(';'), ...rows].join('\n');
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }));
-    link.download = 'relatorio_fotos.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   const toBase64 = (file: File): Promise<string> => {
@@ -663,10 +688,17 @@ const App: React.FC = () => {
               </div>
               <button 
                 onClick={generateCSV} 
-                disabled={records.length === 0} 
-                className="w-full px-4 py-2.5 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                disabled={isGeneratingCSV} 
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
               >
-                Gerar Relatório
+                {isGeneratingCSV ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                    <span>Gerando...</span>
+                  </>
+                ) : (
+                  <span>Gerar Relatório</span>
+                )}
               </button>
             </div>
           )}
