@@ -8,6 +8,7 @@ import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage
 import Dashboard from './components/Dashboard';
 import { v4 as uuidv4 } from 'uuid';
 import { PhotoRecord, PendingRecord } from './types';
+import { loadPendingRecords, savePendingRecord, removePendingRecord, savePendingRecords } from './storage';
 import { CameraIcon, LocationMarkerIcon, CalendarIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
 import Spinner from './components/Spinner';
 import Modal from './components/Modal';
@@ -50,7 +51,7 @@ const App: React.FC = () => {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const [pendingRecord, setPendingRecord] = useState<{ base64: string; timestamp: Date } | null>(null);
+  const [pendingRecord, setPendingRecord] = useState<{ id: string; base64: string; timestamp: Date } | null>(null);
   const [manualAddress, setManualAddress] = useState('');
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -69,6 +70,7 @@ const App: React.FC = () => {
   const fileInputGalleryRef = useRef<HTMLInputElement>(null);
   const debounceTimeoutRef = useRef<number | null>(null);
   const isSyncingRef = useRef(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Autenticação anônima
   useEffect(() => {
@@ -153,25 +155,23 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, [isAuthenticated]);
 
-  // Carregar registros pendentes do localStorage
+  // Carregar registros pendentes do IndexedDB
   useEffect(() => {
-    const stored = localStorage.getItem('pendingRecords');
-    if (stored) {
+    const load = async () => {
       try {
-        const parsed = JSON.parse(stored);
-        setPendingRecords(parsed.map((p: any) => ({ ...p, timestamp: new Date(p.timestamp) })));
+        const stored = await loadPendingRecords();
+        if (stored.length > 0) {
+          setPendingRecords(stored);
+          console.log(`${stored.length} registros pendentes carregados do armazenamento offline`);
+        }
       } catch (e) {
-        console.error('Erro ao carregar registros pendentes:', e);
+        console.error('Erro ao carregar registros pendentes do IndexedDB:', e);
       }
-    }
+    };
+    load();
   }, []);
 
-  // Salvar registros pendentes no localStorage
-  useEffect(() => {
-    localStorage.setItem('pendingRecords', JSON.stringify(pendingRecords));
-  }, [pendingRecords]);
-
-  // Sincronização automática quando online ou quando há pendentes
+  // Sync automático: quando autenticado + pendentes + online, dispara sincronização
   useEffect(() => {
     if (!isSyncingRef.current && pendingRecords.length > 0 && navigator.onLine && isAuthenticated) {
       isSyncingRef.current = true;
@@ -195,6 +195,62 @@ const App: React.FC = () => {
     window.addEventListener('online', handleOnline);
     return () => window.removeEventListener('online', handleOnline);
   }, [isAuthenticated, pendingRecords.length]);
+
+  // Verificação periódica de sincronização (a cada 30s)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (!isSyncingRef.current && isAuthenticated && navigator.onLine) {
+        try {
+          const stored = await loadPendingRecords();
+          if (stored.length > 0) {
+            console.log(`Verificação periódica: ${stored.length} pendentes, tentando sincronizar...`);
+            isSyncingRef.current = true;
+            if (stored.length !== pendingRecords.length) {
+              setPendingRecords(stored);
+            }
+            syncPendingRecords().finally(() => {
+              isSyncingRef.current = false;
+            });
+          }
+        } catch (e) {
+          console.error('Erro na verificação periódica:', e);
+        }
+      }
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated]);
+
+  // Migrar registros do localStorage antigo para IndexedDB (executado uma vez na vida)
+  useEffect(() => {
+    const migrateFromLocalStorage = async () => {
+      try {
+        const stored = localStorage.getItem('pendingRecords');
+        if (!stored) return;
+        const parsed = JSON.parse(stored);
+        if (!Array.isArray(parsed) || parsed.length === 0) return;
+        
+        const existing = await loadPendingRecords();
+        if (existing.length > 0) return;
+        
+        const migrated = parsed.map((p: any) => ({
+          id: uuidv4(),
+          base64: p.base64,
+          address: p.address,
+          timestamp: new Date(p.timestamp),
+          latitude: p.latitude,
+          longitude: p.longitude,
+        }));
+        
+        await savePendingRecords(migrated);
+        localStorage.removeItem('pendingRecords');
+        setPendingRecords(migrated);
+        console.log(`${migrated.length} registros migrados do localStorage para IndexedDB`);
+      } catch (e) {
+        console.error('Erro ao migrar registros do localStorage:', e);
+      }
+    };
+    migrateFromLocalStorage();
+  }, []);
 
   // Promise com timeout para evitar travas indefinidas (rede lenta/offline)
   const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
@@ -394,43 +450,56 @@ const App: React.FC = () => {
         longitude = coords.longitude;
       } catch (gpsErr) {
         console.warn('GPS não disponível no momento:', gpsErr);
-        // GPS falhou, mas continuamos (salvaremos sem coordenadas)
       }
+
+      const isOnline = navigator.onLine;
 
       // Se temos coordenadas, tentar geocoding (requer rede)
       if (latitude !== undefined && longitude !== undefined) {
         try {
           const address = await fetchAddress(latitude, longitude);
-          // Temos endereço, tentar enviar
-          try {
-            await saveRecord(base64, address, timestamp, latitude, longitude);
-          } catch (uploadErr) {
-            console.error('Upload falhou, armazenando localmente com coordenadas:', uploadErr);
-            setPendingRecords(prev => [...prev, { base64, address, timestamp, latitude, longitude }]);
-            setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
+          if (isOnline) {
             try {
-              const code = (uploadErr as any)?.code || 'unknown';
-              const message = (uploadErr as any)?.message || String(uploadErr);
-              setLastErrorDetails(`handleFileChange/saveRecord catch\ncode: ${code}\nmessage: ${message}`);
-            } catch {}
+              await saveRecord(base64, address, timestamp, latitude, longitude);
+            } catch (uploadErr) {
+              console.error('Upload falhou, armazenando offline:', uploadErr);
+              const id = uuidv4();
+              const record: PendingRecord = { id, base64, address, timestamp, latitude, longitude };
+              await savePendingRecord(record);
+              setPendingRecords(prev => [...prev, record]);
+              setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
+              try {
+                const code = (uploadErr as any)?.code || 'unknown';
+                const message = (uploadErr as any)?.message || String(uploadErr);
+                setLastErrorDetails(`handleFileChange/saveRecord catch\ncode: ${code}\nmessage: ${message}`);
+              } catch {}
+            }
+          } else {
+            const id = uuidv4();
+            const record: PendingRecord = { id, base64, address, timestamp, latitude, longitude };
+            await savePendingRecord(record);
+            setPendingRecords(prev => [...prev, record]);
+            setError("Sem conexão. Registro armazenado localmente e será sincronizado automaticamente quando houver rede.");
           }
         } catch (geocodingErr) {
-          // Geocoding falhou (sem rede), mas temos GPS: salvar com coordenadas para geocoding posterior
           console.warn('Geocoding falhou (offline), salvando com coordenadas para posterior:', geocodingErr);
-          setPendingRecords(prev => [...prev, { 
+          const id = uuidv4();
+          const record: PendingRecord = { 
+            id,
             base64, 
             address: `GPS: ${latitude.toFixed(6)}, ${longitude.toFixed(6)} (aguardando geocoding)`, 
             timestamp, 
             latitude, 
             longitude 
-          }]);
+          };
+          await savePendingRecord(record);
+          setPendingRecords(prev => [...prev, record]);
           setError("Sem conexão para obter endereço. Coordenadas GPS salvas; endereço será obtido automaticamente quando houver rede.");
         }
       } else {
-        // Sem GPS: abrir modal para digitar endereço manualmente
         let message = 'GPS não disponível. Por favor, digite o endereço manualmente.';
         setGeoError(message);
-        setPendingRecord({ base64, timestamp });
+        setPendingRecord({ id: uuidv4(), base64, timestamp });
         setIsManualAddressModalOpen(true);
       }
     } catch (err) {
@@ -502,8 +571,10 @@ const App: React.FC = () => {
     try {
       await saveRecord(pendingRecord.base64, manualAddress, pendingRecord.timestamp);
     } catch (err) {
-      // Se falhar, adicionar aos pendentes
-      setPendingRecords(prev => [...prev, { base64: pendingRecord.base64, address: manualAddress, timestamp: pendingRecord.timestamp }]);
+      const id = pendingRecord.id;
+      const record: PendingRecord = { id, base64: pendingRecord.base64, address: manualAddress, timestamp: pendingRecord.timestamp };
+      await savePendingRecord(record);
+      setPendingRecords(prev => [...prev, record]);
       setError("Registro armazenado localmente devido a falha de conexão. Será sincronizado quando houver rede.");
     }
     setPendingRecord(null); setManualAddress(''); setAddressSuggestions([]); setGeoError(null);
@@ -628,50 +699,58 @@ const App: React.FC = () => {
   };
 
   const syncPendingRecords = async () => {
-    if (pendingRecords.length === 0 || !isAuthenticated) return;
-    console.log(`Tentando sincronizar ${pendingRecords.length} registros pendentes...`);
-    const remaining: PendingRecord[] = [];
-    
-    // Processar até 2 uploads em paralelo para melhor performance
-    const PARALLEL_UPLOADS = 2;
-    for (let i = 0; i < pendingRecords.length; i += PARALLEL_UPLOADS) {
-      const batch = pendingRecords.slice(i, i + PARALLEL_UPLOADS);
-      const results = await Promise.allSettled(
-        batch.map(async (record) => {
-          let finalAddress = record.address;
-          
-          // Se temos coordenadas mas endereço é temporário (GPS raw), fazer geocoding agora
-          if (record.latitude !== undefined && record.longitude !== undefined && record.address.startsWith('GPS:')) {
-            try {
-              console.log(`Fazendo geocoding reverso de coordenadas salvas: ${record.latitude}, ${record.longitude}`);
-              finalAddress = await fetchAddress(record.latitude, record.longitude);
-              console.log(`Endereço obtido via geocoding: ${finalAddress}`);
-            } catch (geocodingErr) {
-              console.warn('Geocoding ainda falhou, mantendo coordenadas:', geocodingErr);
-              throw geocodingErr;
-            }
-          }
-          
-          await saveRecord(record.base64, finalAddress, record.timestamp, record.latitude, record.longitude);
-          console.log('Registro pendente sincronizado com sucesso');
-        })
-      );
+    const records = await loadPendingRecords();
+    if (records.length === 0 || !isAuthenticated) return;
+    setIsSyncing(true);
+    try {
+      console.log(`Tentando sincronizar ${records.length} registros pendentes...`);
       
-      // Adicionar falhados de volta à fila
-      results.forEach((result, idx) => {
-        if (result.status === 'rejected') {
-          console.error('Falha ao sincronizar registro pendente:', result.reason);
-          try {
-            const code = (result.reason as any)?.code || 'unknown';
-            const message = (result.reason as any)?.message || String(result.reason);
-            setLastErrorDetails(`syncPendingRecords item failed\ncode: ${code}\nmessage: ${message}`);
-          } catch {}
-          remaining.push(batch[idx]);
-        }
-      });
+      const PARALLEL_UPLOADS = 2;
+      for (let i = 0; i < records.length; i += PARALLEL_UPLOADS) {
+        const batch = records.slice(i, i + PARALLEL_UPLOADS);
+        const results = await Promise.allSettled(
+          batch.map(async (record) => {
+            let finalAddress = record.address;
+            
+            if (record.latitude !== undefined && record.longitude !== undefined && record.address.startsWith('GPS:')) {
+              try {
+                console.log(`Fazendo geocoding reverso de coordenadas salvas: ${record.latitude}, ${record.longitude}`);
+                finalAddress = await fetchAddress(record.latitude, record.longitude);
+                console.log(`Endereço obtido via geocoding: ${finalAddress}`);
+              } catch (geocodingErr) {
+                console.warn('Geocoding ainda falhou, mantendo coordenadas:', geocodingErr);
+                throw geocodingErr;
+              }
+            }
+            
+            await saveRecord(record.base64, finalAddress, record.timestamp, record.latitude, record.longitude);
+            await removePendingRecord(record.id);
+            console.log('Registro pendente sincronizado e removido do armazenamento offline');
+          })
+        );
+        
+        results.forEach((result) => {
+          if (result.status === 'rejected') {
+            console.error('Falha ao sincronizar registro pendente:', result.reason);
+            try {
+              const code = (result.reason as any)?.code || 'unknown';
+              const message = (result.reason as any)?.message || String(result.reason);
+              setLastErrorDetails(`syncPendingRecords item failed\ncode: ${code}\nmessage: ${message}`);
+            } catch {}
+          }
+        });
+      }
+      
+      const remaining = await loadPendingRecords();
+      setPendingRecords(remaining);
+      if (remaining.length === 0) {
+        console.log('Todos os registros pendentes foram sincronizados');
+      } else {
+        console.log(`${remaining.length} registros ainda pendentes após sincronização`);
+      }
+    } finally {
+      setIsSyncing(false);
     }
-    
-    setPendingRecords(remaining);
   };
 
   return (
@@ -929,7 +1008,12 @@ const App: React.FC = () => {
           )}
           {pendingRecords.length > 0 && (
             <div className="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
-              <p className="text-yellow-800 text-sm">📶 {pendingRecords.length} registro(s) aguardando sincronização (sem conexão).</p>
+              <p className="text-yellow-800 text-sm">
+                {isSyncing 
+                  ? `Sincronizando ${pendingRecords.length} registro(s) pendente(s)...`
+                  : `${pendingRecords.length} registro(s) aguardando sincronização (sem conexão).`
+                }
+              </p>
             </div>
           )}
         </div>

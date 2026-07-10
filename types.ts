@@ -8,10 +8,10 @@ export interface PhotoRecord {
 }
 
 export interface PendingRecord {
+  id: string;
   base64: string;
   address: string;
   timestamp: Date;
-  // Coordenadas para geocoding reverso posterior (quando houver rede)
   latitude?: number;
   longitude?: number;
 }
