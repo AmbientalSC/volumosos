@@ -16,11 +16,14 @@
   "dependencies": {
     "@capacitor/android": "^7.4.4",
     "@capacitor/geolocation": "^7.1.5",
+    "autoprefixer": "^10.5.2",
     "firebase": "^11.10.0",
     "idb": "^8.0.3",
+    "postcss": "^8.5.16",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "recharts": "^3.8.1",
+    "tailwindcss": "^3.4.19",
     "uuid": "9.0.1"
   },
   "devDependencies": {

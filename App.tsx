@@ -1,32 +1,19 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
 import { db, storage, signInAnonymouslyAsync, checkAuthState, auth } from './firebase';
 import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc, limit, getDocs, where } from 'firebase/firestore';
 import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-import Dashboard from './components/Dashboard';
-import { v4 as uuidv4 } from 'uuid';
 import { PhotoRecord, PendingRecord } from './types';
 import { loadPendingRecords, savePendingRecord, removePendingRecord, savePendingRecords } from './storage';
-import { CameraIcon, LocationMarkerIcon, CalendarIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
+import { CameraIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
 import Spinner from './components/Spinner';
 import Modal from './components/Modal';
+import RecordCard from './components/RecordCard';
+import ToastContainer, { Toast, ToastType } from './components/Toast';
 
-// Helper to format date and time
-const formatDateTime = (date: Date) => {
-  return {
-    date: date.toLocaleDateString('pt-BR', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-    }),
-    time: date.toLocaleTimeString('pt-BR', {
-      hour: '2-digit',
-      minute: '2-digit',
-    }),
-  };
-};
+const Dashboard = lazy(() => import('./components/Dashboard'));
 
 const App: React.FC = () => {
   const [records, setRecords] = useState<PhotoRecord[]>([]);
@@ -45,7 +32,6 @@ const App: React.FC = () => {
 
   type ViewState = 'main' | 'login' | 'dashboard';
   const [currentView, setCurrentView] = useState<ViewState>('main');
-  const [selectedRecord, setSelectedRecord] = useState<PhotoRecord | null>(null);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -71,6 +57,23 @@ const App: React.FC = () => {
   const debounceTimeoutRef = useRef<number | null>(null);
   const isSyncingRef = useRef(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const scrollYRef = useRef(0);
+
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [onlineStatus, setOnlineStatus] = useState(navigator.onLine);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
+  const pullStartY = useRef(0);
+
+  const addToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = crypto.randomUUID();
+    setToasts(prev => [...prev, { id, message, type }]);
+  }, []);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
 
   // Autenticação anônima
   useEffect(() => {
@@ -233,7 +236,7 @@ const App: React.FC = () => {
         if (existing.length > 0) return;
         
         const migrated = parsed.map((p: any) => ({
-          id: uuidv4(),
+          id: crypto.randomUUID(),
           base64: p.base64,
           address: p.address,
           timestamp: new Date(p.timestamp),
@@ -251,6 +254,75 @@ const App: React.FC = () => {
     };
     migrateFromLocalStorage();
   }, []);
+
+  // Monitorar status online/offline com indicador visual
+  useEffect(() => {
+    const handleOnline = () => { setOnlineStatus(true); addToast('Conexão restaurada', 'success'); };
+    const handleOffline = () => { setOnlineStatus(false); addToast('Sem conexão com a internet', 'warning'); };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [addToast]);
+
+  // Header colapsável ao scroll
+  useEffect(() => {
+    let ticking = false;
+    const handleScroll = () => {
+      if (!ticking) {
+        requestAnimationFrame(() => {
+          const currentY = window.scrollY;
+          if (currentY > 80 && currentY > scrollYRef.current) {
+            setIsHeaderCollapsed(true);
+          } else if (currentY < 40) {
+            setIsHeaderCollapsed(false);
+          }
+          scrollYRef.current = currentY;
+          ticking = false;
+        });
+        ticking = true;
+      }
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  // Pull-to-refresh
+  useEffect(() => {
+    const handleTouchStart = (e: TouchEvent) => {
+      if (window.scrollY === 0) {
+        pullStartY.current = e.touches[0].clientY;
+      }
+    };
+    const handleTouchMove = (e: TouchEvent) => {
+      if (window.scrollY === 0 && pullStartY.current > 0) {
+        const dy = e.touches[0].clientY - pullStartY.current;
+        if (dy > 60) {
+          setIsPulling(true);
+        }
+      }
+    };
+    const handleTouchEnd = () => {
+      if (isPulling) {
+        setIsPulling(false);
+      }
+      pullStartY.current = 0;
+    };
+    document.addEventListener('touchstart', handleTouchStart, { passive: true });
+    document.addEventListener('touchmove', handleTouchMove, { passive: true });
+    document.addEventListener('touchend', handleTouchEnd);
+    return () => {
+      document.removeEventListener('touchstart', handleTouchStart);
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, [isPulling]);
+
+  const filteredRecords = searchQuery
+    ? records.filter(r => r.address.toLowerCase().includes(searchQuery.toLowerCase()))
+    : records;
 
   // Promise com timeout para evitar travas indefinidas (rede lenta/offline)
   const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
@@ -336,7 +408,7 @@ const App: React.FC = () => {
       
       setUploadProgress(40);
       await withTimeout((async () => {
-        const imageRef = ref(storage, `images/${uuidv4()}.jpg`);
+        const imageRef = ref(storage, `images/${crypto.randomUUID()}.jpg`);
         
         // Upload com progresso simulado
         setUploadProgress(50);
@@ -358,6 +430,7 @@ const App: React.FC = () => {
         });
         setUploadProgress(100);
         console.log("Registro salvo com sucesso no Firestore");
+        addToast('Foto enviada com sucesso!', 'success');
         
         // Limpar stats após 3s
         setTimeout(() => setCompressionStats(null), 3000);
@@ -463,7 +536,7 @@ const App: React.FC = () => {
               await saveRecord(base64, address, timestamp, latitude, longitude);
             } catch (uploadErr) {
               console.error('Upload falhou, armazenando offline:', uploadErr);
-              const id = uuidv4();
+              const id = crypto.randomUUID();
               const record: PendingRecord = { id, base64, address, timestamp, latitude, longitude };
               await savePendingRecord(record);
               setPendingRecords(prev => [...prev, record]);
@@ -475,15 +548,16 @@ const App: React.FC = () => {
               } catch {}
             }
           } else {
-            const id = uuidv4();
+            const id = crypto.randomUUID();
             const record: PendingRecord = { id, base64, address, timestamp, latitude, longitude };
             await savePendingRecord(record);
             setPendingRecords(prev => [...prev, record]);
-            setError("Sem conexão. Registro armazenado localmente e será sincronizado automaticamente quando houver rede.");
+            addToast('Registro salvo offline. Sera sincronizado automaticamente.', 'warning');
+            setError("Sem conexao. Registro armazenado localmente e sera sincronizado automaticamente quando houver rede.");
           }
         } catch (geocodingErr) {
           console.warn('Geocoding falhou (offline), salvando com coordenadas para posterior:', geocodingErr);
-          const id = uuidv4();
+          const id = crypto.randomUUID();
           const record: PendingRecord = { 
             id,
             base64, 
@@ -494,12 +568,13 @@ const App: React.FC = () => {
           };
           await savePendingRecord(record);
           setPendingRecords(prev => [...prev, record]);
-          setError("Sem conexão para obter endereço. Coordenadas GPS salvas; endereço será obtido automaticamente quando houver rede.");
+          addToast('Coordenadas GPS salvas. Endereco sera obtido quando houver rede.', 'info');
+          setError("Sem conexao para obter endereco. Coordenadas GPS salvas; endereco sera obtido automaticamente quando houver rede.");
         }
       } else {
         let message = 'GPS não disponível. Por favor, digite o endereço manualmente.';
         setGeoError(message);
-        setPendingRecord({ id: uuidv4(), base64, timestamp });
+        setPendingRecord({ id: crypto.randomUUID(), base64, timestamp });
         setIsManualAddressModalOpen(true);
       }
     } catch (err) {
@@ -580,11 +655,6 @@ const App: React.FC = () => {
     setPendingRecord(null); setManualAddress(''); setAddressSuggestions([]); setGeoError(null);
   };
 
-  const handleLongPress = (record: PhotoRecord) => {
-    setRecordToDelete(record);
-    setIsDeleteModalOpen(true);
-  };
-
   const handleDeleteRecord = async () => {
     if (!recordToDelete) return;
     
@@ -611,6 +681,7 @@ const App: React.FC = () => {
       
       setIsDeleteModalOpen(false);
       setRecordToDelete(null);
+      addToast('Registro excluido com sucesso', 'success');
     } catch (error) {
       console.error("Erro ao deletar registro:", error);
       setError("Falha ao deletar o registro. Tente novamente.");
@@ -745,8 +816,9 @@ const App: React.FC = () => {
       setPendingRecords(remaining);
       if (remaining.length === 0) {
         console.log('Todos os registros pendentes foram sincronizados');
+        addToast('Todos os registros foram sincronizados', 'success');
       } else {
-        console.log(`${remaining.length} registros ainda pendentes após sincronização`);
+        console.log(`${remaining.length} registros ainda pendentes apos sincronizacao`);
       }
     } finally {
       setIsSyncing(false);
@@ -755,22 +827,25 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
-      <header className="bg-white shadow-md sticky top-0 z-20">
-        <div className="w-full max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex flex-col sm:flex-row justify-between items-center mb-4 gap-4">
-            <div className="w-full sm:w-32 hidden sm:block"></div> {/* Espaçador */}
-            <h1 className="text-2xl sm:text-3xl font-bold text-teal-600 tracking-tight text-center flex-1">Controle de Volumosos - BC</h1>
-            <div className="w-full sm:w-32 flex justify-center sm:justify-end">
+      {/* Indicador online/offline */}
+      <div className={`fixed top-0 left-0 right-0 z-50 h-1.5 transition-colors duration-300 ${onlineStatus ? 'bg-emerald-500' : 'bg-red-500'}`} />
+
+      <header className={`bg-white shadow-md sticky top-0 z-20 transition-all duration-300 ${isHeaderCollapsed ? 'py-2' : ''}`}>
+        <div className={`w-full max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 transition-all duration-300 ${isHeaderCollapsed ? 'py-1' : 'py-4 md:py-6'}`}>
+          <div className={`flex items-center gap-2 ${isHeaderCollapsed ? 'justify-start' : 'flex-col sm:flex-row justify-between mb-2 md:mb-4'}`}>
+            <div className="w-full sm:w-32 hidden sm:block"></div>
+            <h1 className={`font-bold text-teal-600 tracking-tight text-center flex-1 transition-all duration-300 ${isHeaderCollapsed ? 'text-base text-left' : 'text-xl sm:text-2xl md:text-3xl'}`}>Controle de Volumosos - BC</h1>
+            <div className={`w-full sm:w-32 flex justify-center sm:justify-end ${isHeaderCollapsed ? 'hidden sm:flex' : ''}`}>
               {!Capacitor.isNativePlatform() && (
                 currentView === 'main' ? (
-                  <button 
+                  <button
                     onClick={() => setCurrentView('login')}
                     className="hidden sm:block px-3 py-1.5 text-sm font-medium bg-slate-200 text-slate-700 hover:bg-slate-300 rounded transition-colors"
                   >
                     Acesso Restrito
                   </button>
                 ) : (
-                  <button 
+                  <button
                     onClick={() => currentView === 'login' ? setCurrentView('main') : handleLogout()}
                     className="hidden sm:block px-3 py-1.5 text-sm font-medium bg-slate-200 text-slate-700 hover:bg-slate-300 rounded transition-colors"
                   >
@@ -780,54 +855,54 @@ const App: React.FC = () => {
               )}
             </div>
           </div>
-          
-          {/* Botão recolhível para mostrar filtros */}
-          <div className="flex justify-center mb-3">
-            <button 
+
+          {!isHeaderCollapsed && (
+          <div className="flex justify-center mb-2 md:mb-3">
+            <button
               onClick={() => setShowReportFilters(!showReportFilters)}
-              className="px-4 py-2 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-400 transition-colors flex items-center gap-2"
+              className="px-3 py-1.5 md:px-4 md:py-2 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-400 transition-colors flex items-center gap-2 text-sm md:text-base"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 md:h-5 md:w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               <span>{showReportFilters ? 'Ocultar Relatório' : 'Gerar Relatório'}</span>
-              <svg xmlns="http://www.w3.org/2000/svg" className={`h-4 w-4 transition-transform ${showReportFilters ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg xmlns="http://www.w3.org/2000/svg" className={`h-3 w-3 md:h-4 md:w-4 transition-transform ${showReportFilters ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
           </div>
+          )}
 
-          {/* Painel de filtros (recolhível) */}
-          {showReportFilters && (
-            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 max-w-xl mx-auto">
-              <div className="grid grid-cols-2 gap-3 mb-3">
+          {showReportFilters && !isHeaderCollapsed && (
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 md:p-4 max-w-xl mx-auto">
+              <div className="grid grid-cols-2 gap-2 md:gap-3 mb-2 md:mb-3">
                 <div className="flex flex-col gap-1">
-                  <label htmlFor="startDate" className="text-sm font-medium text-slate-600">De:</label>
-                  <input 
-                    type="date" 
-                    id="startDate" 
-                    value={startDate} 
-                    onChange={(e) => setStartDate(e.target.value)} 
-                    className="px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm w-full" 
+                  <label htmlFor="startDate" className="text-xs md:text-sm font-medium text-slate-600">De:</label>
+                  <input
+                    type="date"
+                    id="startDate"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="px-2 py-1.5 md:px-3 md:py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm w-full"
                     aria-label="Data inicial do filtro"
                   />
                 </div>
                 <div className="flex flex-col gap-1">
-                  <label htmlFor="endDate" className="text-sm font-medium text-slate-600">Até:</label>
-                  <input 
-                    type="date" 
-                    id="endDate" 
-                    value={endDate} 
-                    onChange={(e) => setEndDate(e.target.value)} 
-                    className="px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm w-full" 
+                  <label htmlFor="endDate" className="text-xs md:text-sm font-medium text-slate-600">Até:</label>
+                  <input
+                    type="date"
+                    id="endDate"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="px-2 py-1.5 md:px-3 md:py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm w-full"
                     aria-label="Data final do filtro"
                   />
                 </div>
               </div>
-              <button 
-                onClick={generateCSV} 
-                disabled={isGeneratingCSV} 
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+              <button
+                onClick={generateCSV}
+                disabled={isGeneratingCSV}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 md:py-2.5 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-sm md:text-base"
               >
                 {isGeneratingCSV ? (
                   <>
@@ -867,7 +942,14 @@ const App: React.FC = () => {
 
       {currentView === 'dashboard' && (
         <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8">
-          <Dashboard />
+          <Suspense fallback={
+            <div className="flex flex-col items-center justify-center p-12">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-t-2 border-teal-600 mb-4"></div>
+              <p className="text-slate-600">Carregando painel...</p>
+            </div>
+          }>
+            <Dashboard />
+          </Suspense>
         </main>
       )}
 
@@ -932,25 +1014,24 @@ const App: React.FC = () => {
             </div>
           </Modal>
 
-          <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8">
-        <div className="bg-white p-6 rounded-xl shadow-lg mb-8 border border-slate-200">
-          <h2 className="text-xl font-semibold mb-4 text-center">Adicionar um Novo Registro</h2>
+          <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8 pb-24">
+        <div className="bg-white p-4 md:p-6 rounded-xl shadow-lg mb-6 md:mb-8 border border-slate-200">
+          <h2 className="text-lg md:text-xl font-semibold mb-3 md:mb-4 text-center">Adicionar um Novo Registro</h2>
           <div className="flex justify-center">
-              <button onClick={() => setIsModalOpen(true)} disabled={isSubmitting} className="w-full sm:w-auto flex items-center justify-center gap-3 px-8 py-4 bg-teal-500 text-white font-bold rounded-lg shadow-lg hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 disabled:bg-teal-300 transition-all duration-300 transform hover:scale-105"><CameraIcon className="h-6 w-6" /><span>{isSubmitting ? 'Processando...' : 'Adicionar Foto'}</span></button>
+              <button onClick={() => setIsModalOpen(true)} disabled={isSubmitting} className="w-full sm:w-auto flex items-center justify-center gap-2 md:gap-3 px-6 md:px-8 py-3 md:py-4 bg-teal-500 text-white font-bold rounded-lg shadow-lg hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 disabled:bg-teal-300 transition-all duration-300 transform hover:scale-105 text-sm md:text-base"><CameraIcon className="h-5 w-5 md:h-6 md:w-6" /><span>{isSubmitting ? 'Processando...' : 'Adicionar Foto'}</span></button>
           </div>
           <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           
           {isSubmitting && (
-            <div className="flex flex-col items-center justify-center mt-6 text-slate-600">
+            <div className="flex flex-col items-center justify-center mt-4 md:mt-6 text-slate-600">
               <Spinner />
-              <p className="mt-2 font-medium">
+              <p className="mt-2 font-medium text-sm md:text-base">
                 {uploadProgress < 20 ? 'Processando imagem...' :
                  uploadProgress < 40 ? 'Comprimindo...' :
                  uploadProgress < 70 ? 'Enviando...' :
-                 uploadProgress < 100 ? 'Finalizando...' : 'Concluído!'}
+                 uploadProgress < 100 ? 'Finalizando...' : 'Concluido!'}
               </p>
-              {/* Barra de progresso */}
               <div className="w-full max-w-xs mt-3 bg-slate-200 rounded-full h-2 overflow-hidden">
                 <div 
                   className="bg-teal-500 h-full transition-all duration-300 ease-out"
@@ -965,8 +1046,8 @@ const App: React.FC = () => {
           
           {compressionStats && (
             <div className="mt-4 p-3 bg-green-100 border border-green-300 rounded-lg text-center">
-              <p className="text-green-800 text-sm">
-                ✅ Imagem otimizada: {(compressionStats.original / 1024).toFixed(1)}KB → {(compressionStats.compressed / 1024).toFixed(1)}KB 
+              <p className="text-green-800 text-xs md:text-sm">
+                Imagem otimizada: {(compressionStats.original / 1024).toFixed(1)}KB &rarr; {(compressionStats.compressed / 1024).toFixed(1)}KB
                 <span className="font-semibold ml-1">
                   ({Math.round((1 - compressionStats.compressed / compressionStats.original) * 100)}% menor)
                 </span>
@@ -976,7 +1057,7 @@ const App: React.FC = () => {
           
           {error && (
             <div className="mt-4 text-center text-red-600 bg-red-100 p-3 rounded-lg">
-              <p>{error}</p>
+              <p className="text-sm">{error}</p>
               {lastErrorDetails && (
                 <div className="mt-2 text-left">
                   <button
@@ -1009,14 +1090,44 @@ const App: React.FC = () => {
           {pendingRecords.length > 0 && (
             <div className="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
               <p className="text-yellow-800 text-sm">
-                {isSyncing 
+                {isSyncing
                   ? `Sincronizando ${pendingRecords.length} registro(s) pendente(s)...`
-                  : `${pendingRecords.length} registro(s) aguardando sincronização (sem conexão).`
+                  : `${pendingRecords.length} registro(s) aguardando sincronizacao (sem conexao).`
                 }
               </p>
             </div>
           )}
         </div>
+
+        {/* Barra de busca */}
+        {records.length > 0 && !isLoading && (
+          <div className="mb-4">
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Buscar por endereco..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-4 py-2.5 pl-10 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm bg-white shadow-sm"
+              />
+              <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              {searchQuery && (
+                <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                  <XIcon className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Pull-to-refresh indicator */}
+        {isPulling && (
+          <div className="flex justify-center py-3">
+            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-t-2 border-teal-500"></div>
+          </div>
+        )}
 
         <div className="space-y-6">
           {isLoading && <div className="flex justify-center py-12"><Spinner /></div>}
@@ -1024,114 +1135,47 @@ const App: React.FC = () => {
             <div className="text-center py-12 bg-white rounded-xl shadow-md border border-slate-200">
               <CameraIcon className="mx-auto h-16 w-16 text-slate-300" />
               <h3 className="mt-2 text-lg font-medium text-slate-700">Nenhum Registro Ainda</h3>
-              <p className="mt-1 text-sm text-slate-500">Clique no botão acima para adicionar seu primeiro registro.</p>
+              <p className="mt-1 text-sm text-slate-500">Clique no botao acima para adicionar seu primeiro registro.</p>
+            </div>
+          )}
+          {!isLoading && records.length > 0 && searchQuery && filteredRecords.length === 0 && (
+            <div className="text-center py-8 text-slate-500">
+              <p>Nenhum registro encontrado para "{searchQuery}"</p>
             </div>
           )}
           {!isLoading && records.length > 0 && (
-            <div className="flex flex-col lg:flex-row gap-6">
-              {/* Lista (Desktop Esquerda / Mobile Central) */}
-              <div className="w-full lg:w-1/3 xl:w-1/4 flex flex-col gap-4 lg:h-[800px] lg:overflow-y-auto lg:pr-2">
-                {records.map(record => {
-                  const {date, time} = formatDateTime(record.timestamp);
-                  
-                  const createLongPressHandlers = (imageUrl: string) => {
-                    let longPressTimer: NodeJS.Timeout | undefined;
-                    let isLongPress = false;
-                    
-                    const start = () => {
-                      isLongPress = false;
-                      longPressTimer = setTimeout(() => {
-                        isLongPress = true;
-                        handleLongPress(record);
-                      }, 500);
-                    };
-                    
-                    const stop = () => {
-                      if (longPressTimer) {
-                        clearTimeout(longPressTimer);
-                      }
-                    };
-                    
-                    const handleClick = () => {
-                      if (!isLongPress) {
-                        if (window.innerWidth >= 1024) {
-                          setSelectedRecord(record);
-                        } else {
-                          setViewingImage(imageUrl);
-                        }
-                      }
-                    };
-                    
-                    return {
-                      onMouseDown: start,
-                      onMouseUp: stop,
-                      onMouseLeave: stop,
-                      onTouchStart: start,
-                      onTouchEnd: stop,
-                      onClick: handleClick,
-                    };
-                  };
-                  
-                  const longPressHandlers = createLongPressHandlers(record.imageUrl);
-                  const isSelected = selectedRecord?.id === record.id;
-                  
-                  return (
-                    <div 
-                      key={record.id} 
-                      {...longPressHandlers}
-                      className={`bg-white rounded-xl shadow-sm overflow-hidden transition-all duration-300 hover:shadow-md cursor-pointer select-none border-2 shrink-0 ${isSelected ? 'border-teal-500 bg-teal-50' : 'border-transparent'}`}
-                    >
-                      {/* Foto aparece apenas no Mobile */}
-                      <img 
-                        src={record.imageUrl} 
-                        alt="Momento capturado" 
-                        className="object-cover w-full h-48 sm:h-56 bg-slate-100 lg:hidden"
-                        loading="lazy" 
-                      />
-                      <div className="p-4 flex flex-col flex-grow">
-                        <div className="flex items-start gap-3 mb-2">
-                          <LocationMarkerIcon className="h-5 w-5 text-teal-500 flex-shrink-0 mt-0.5" />
-                          <p className="text-slate-700 font-medium text-sm leading-tight line-clamp-2">{record.address}</p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <CalendarIcon className="h-5 w-5 text-teal-500 flex-shrink-0" />
-                          <p className="text-slate-600 text-xs sm:text-sm">{date} às {time}</p>
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* Detalhes (Apenas Desktop) */}
-              <div className="hidden lg:flex w-full lg:w-2/3 xl:w-3/4 flex-col gap-6 h-[800px]">
-                {selectedRecord ? (
-                  <div className="bg-white rounded-xl shadow-md border border-slate-200 p-6 h-full flex flex-col">
-                    <div className="flex-1 flex items-center justify-center overflow-hidden mb-6 bg-slate-50 rounded-lg border border-slate-100">
-                      <img src={selectedRecord.imageUrl} alt="Momento Capturado Expandido" className="max-h-full max-w-full object-contain" />
-                    </div>
-                    <div className="p-5 bg-white rounded-lg border border-slate-200 flex flex-col gap-2 shrink-0 shadow-sm">
-                       <div className="flex items-start gap-3">
-                         <LocationMarkerIcon className="h-6 w-6 text-teal-500 flex-shrink-0 mt-0.5" />
-                         <h3 className="text-lg font-semibold text-slate-800 leading-tight">{selectedRecord.address}</h3>
-                       </div>
-                       <div className="flex justify-between items-center mt-2 pt-3 border-t border-slate-100">
-                         <p className="text-slate-500 text-sm">Registro gerado em {formatDateTime(selectedRecord.timestamp).date} às {formatDateTime(selectedRecord.timestamp).time}</p>
-                         <p className="text-slate-400 text-xs font-mono">ID: {selectedRecord.id}</p>
-                       </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="bg-white rounded-xl shadow-md border border-slate-200 p-12 flex flex-col items-center justify-center h-full text-slate-500">
-                    <ImageIcon className="h-16 w-16 mb-4 opacity-30" />
-                    <p className="text-lg">Selecione uma coleta na lista ao lado para ver os detalhes</p>
-                  </div>
-                )}
-              </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 md:gap-4">
+              {filteredRecords.map(record => (
+                <RecordCard
+                  key={record.id}
+                  record={record}
+                  isSelected={false}
+                  onTap={(rec) => setViewingImage(rec.imageUrl)}
+                  onDelete={(rec) => {
+                    setRecordToDelete(rec);
+                    setIsDeleteModalOpen(true);
+                  }}
+                />
+              ))}
             </div>
           )}
         </div>
       </main>
+
+      {/* FAB - Floating Action Button */}
+      {currentView === 'main' && (
+        <button
+          onClick={() => setIsModalOpen(true)}
+          disabled={isSubmitting}
+          className="fixed bottom-6 right-6 z-30 w-14 h-14 bg-teal-500 text-white rounded-full shadow-xl hover:bg-teal-600 active:scale-95 disabled:bg-teal-300 transition-all duration-300 flex items-center justify-center"
+          aria-label="Adicionar foto"
+        >
+          <CameraIcon className="h-7 w-7" />
+        </button>
+      )}
+
+      {/* Toasts */}
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
       </>
       )}
     </div>
