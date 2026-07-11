@@ -5,7 +5,10 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   MINIO_ENDPOINT: z.string().min(1),
   MINIO_PORT: z.coerce.number().default(9000),
-  MINIO_USE_SSL: z.coerce.boolean().default(false),
+  MINIO_USE_SSL: z
+    .string()
+    .optional()
+    .transform((value) => value === 'true'),
   MINIO_ACCESS_KEY: z.string().min(1),
   MINIO_SECRET_KEY: z.string().min(1),
   MINIO_BUCKET: z.string().default('volumosos'),
