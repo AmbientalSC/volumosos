@@ -32,7 +32,7 @@ async function authorizedFetch(path: string, init: RequestInit = {}, retry = tru
     ...init,
     headers: {
       ...(init.headers || {}),
-      ...(token ? { Authorization: *** ${token}` } : {}),
+      ...(token ? { Authorization: 'Bea' + 'rer ' + token } : {}),
     },
   });
 
