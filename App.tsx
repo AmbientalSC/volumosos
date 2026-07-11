@@ -1,10 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
-import { db, storage, signInAnonymouslyAsync, checkAuthState, auth } from './firebase';
-import { collection, addDoc, query, orderBy, onSnapshot, Timestamp, deleteDoc, doc, limit, getDocs, where } from 'firebase/firestore';
+import { signInAnonymouslyAsync, checkAuthState, auth } from './firebase';
 import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { listRecords, getUploadUrl, createRecord, deleteRecord, exportCsvRows } from './apiClient';
 import { PhotoRecord, PendingRecord } from './types';
 import { loadPendingRecords, savePendingRecord, removePendingRecord, savePendingRecords } from './storage';
 import { CameraIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
@@ -120,43 +119,31 @@ const App: React.FC = () => {
     requestLocationPermission();
   }, []);
 
+  const REALTIME_POLL_INTERVAL_MS = 20000;
+
+  const fetchRecords = useCallback(async () => {
+    try {
+      const recordsData = await listRecords(50);
+      setRecords(recordsData);
+    } catch (error) {
+      console.error("Error fetching records:", error);
+      setError("Não foi possível carregar os registros. Verifique sua conexão.");
+    }
+  }, []);
+
   useEffect(() => {
     if (!isAuthenticated) {
       console.log("Usuário não autenticado ainda, aguardando...");
       return;
     }
-    
+
     console.log("Usuário autenticado, carregando registros...");
     setIsLoading(true);
-    const q = query(collection(db, "records"), orderBy("timestamp", "desc"), limit(50));
-    const unsubscribe = onSnapshot(q, 
-      (querySnapshot) => {
-        console.log("Registros carregados com sucesso:", querySnapshot.size, "documentos");
-        const recordsData: PhotoRecord[] = [];
-        querySnapshot.forEach((doc) => {
-            const data = doc.data();
-            recordsData.push({
-                id: doc.id,
-                address: data.address,
-                imageUrl: data.imageUrl,
-                timestamp: (data.timestamp as Timestamp).toDate(),
-                latitude: data.latitude,
-                longitude: data.longitude,
-            });
-        });
-        setRecords(recordsData);
-        setIsLoading(false);
-      }, 
-      (error) => {
-        console.error("Error fetching records:", error);
-        console.error("Código do erro:", error.code);
-        console.error("Mensagem do erro:", error.message);
-        setError("Não foi possível carregar os registros. Verifique sua conexão e as permissões do Firebase.");
-        setIsLoading(false);
-      }
-    );
-    return () => unsubscribe();
-  }, [isAuthenticated]);
+    fetchRecords().finally(() => setIsLoading(false));
+
+    const interval = setInterval(() => { fetchRecords(); }, REALTIME_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, fetchRecords]);
 
   // Carregar registros pendentes do IndexedDB
   useEffect(() => {
@@ -408,30 +395,31 @@ const App: React.FC = () => {
       
       setUploadProgress(40);
       await withTimeout((async () => {
-        const imageRef = ref(storage, `images/${crypto.randomUUID()}.jpg`);
-        
-        // Upload com progresso simulado
         setUploadProgress(50);
-        const snapshot = await uploadBytes(imageRef, compressedBlob);
+        const { uploadUrl, imageKey } = await getUploadUrl();
+        const putResponse = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'image/jpeg' },
+          body: compressedBlob,
+        });
+        if (!putResponse.ok) throw new Error('Falha ao enviar imagem para o armazenamento.');
         setUploadProgress(70);
         console.log("Imagem enviada com sucesso");
-        
-        const imageUrl = await getDownloadURL(snapshot.ref);
-        console.log("URL da imagem obtida:", imageUrl);
-        setUploadProgress(85);
 
-        console.log("Salvando registro no Firestore...");
-        await addDoc(collection(db, "records"), {
-          imageUrl,
+        console.log("Salvando registro...");
+        await createRecord({
+          imageKey,
           address,
-          timestamp: Timestamp.fromDate(timestamp),
+          capturedAt: timestamp.toISOString(),
           ...(latitude !== undefined && { latitude }),
           ...(longitude !== undefined && { longitude }),
         });
+        setUploadProgress(85);
+        await fetchRecords();
         setUploadProgress(100);
-        console.log("Registro salvo com sucesso no Firestore");
+        console.log("Registro salvo com sucesso");
         addToast('Foto enviada com sucesso!', 'success');
-        
+
         // Limpar stats após 3s
         setTimeout(() => setCompressionStats(null), 3000);
       })(), 30000); // 30s de timeout para upload comprimido
@@ -660,28 +648,13 @@ const App: React.FC = () => {
     
     setIsSubmitting(true);
     try {
-      // Use a URL completa diretamente para obter a referência do Storage
-      // (o SDK aceita https:// e gs://). Se não existir, ignoramos o erro.
-      const imageUrl = recordToDelete.imageUrl;
-      try {
-        const imageRef = ref(storage, imageUrl);
-        await deleteObject(imageRef);
-        console.log("Imagem deletada do Storage");
-      } catch (e: any) {
-        if (e?.code === 'storage/object-not-found') {
-          console.warn('Imagem não encontrada no Storage, prosseguindo com exclusão do Firestore.');
-        } else {
-          console.warn('Falha ao deletar imagem do Storage, prosseguindo mesmo assim:', e);
-        }
-      }
+      await deleteRecord(recordToDelete.id);
+      console.log("Registro deletado");
 
-      // Deletar o documento do Firestore
-      await deleteDoc(doc(db, "records", recordToDelete.id));
-      console.log("Registro deletado do Firestore");
-      
       setIsDeleteModalOpen(false);
       setRecordToDelete(null);
       addToast('Registro excluido com sucesso', 'success');
+      await fetchRecords();
     } catch (error) {
       console.error("Erro ao deletar registro:", error);
       setError("Falha ao deletar o registro. Tente novamente.");
@@ -693,33 +666,19 @@ const App: React.FC = () => {
   const generateCSV = async () => {
     setIsGeneratingCSV(true);
     try {
-      let q = query(collection(db, "records"), orderBy("timestamp", "desc"));
-      
-      if (startDate && endDate) {
-        const start = new Date(startDate); start.setHours(0, 0, 0, 0);
-        const end = new Date(endDate); end.setHours(23, 59, 59, 999);
-        q = query(
-          collection(db, "records"),
-          where("timestamp", ">=", Timestamp.fromDate(start)),
-          where("timestamp", "<=", Timestamp.fromDate(end)),
-          orderBy("timestamp", "desc")
-        );
+      const exportRows = await exportCsvRows(startDate, endDate);
+
+      if (exportRows.length === 0) {
+        alert("Nenhum registro encontrado para o período selecionado.");
+        return;
       }
-      
-      const querySnapshot = await getDocs(q);
-      
-      if (querySnapshot.empty) { 
-        alert("Nenhum registro encontrado para o período selecionado."); 
-        return; 
-      }
-      
+
       // Cabeçalho: Data;Local;LINK PARA A IMAGEM
       const headers = ['Data', 'Local', 'LINK PARA A IMAGEM'];
-      const rows = querySnapshot.docs.map(doc => {
-          const data = doc.data();
-          const timestamp = (data.timestamp as Timestamp).toDate();
-          const address = data.address || '';
-          
+      const rows = exportRows.map(row => {
+          const timestamp = new Date(row.capturedAt);
+          const address = row.address || '';
+
           // Formatar data e hora: dd/mm/aaaa hh:mm
           const day = timestamp.getDate().toString().padStart(2, '0');
           const month = (timestamp.getMonth() + 1).toString().padStart(2, '0');
@@ -727,10 +686,10 @@ const App: React.FC = () => {
           const hours = timestamp.getHours().toString().padStart(2, '0');
           const minutes = timestamp.getMinutes().toString().padStart(2, '0');
           const dateTime = `${day}/${month}/${year} ${hours}:${minutes}`;
-          
+
           const local = address.replace(/;/g, ','); // Evita quebrar coluna
           // Hiperlink Excel: =HYPERLINK("url";"Clique aqui")
-          const link = `${data.imageUrl}`;
+          const link = `${row.imageUrl}`;
           return [dateTime, local, link].join(';');
       });
       const csvContent = "\uFEFF" + [headers.join(';'), ...rows].join('\n');

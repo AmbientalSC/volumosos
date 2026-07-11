@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { collection, getDocs, query, orderBy, limit, Timestamp, getCountFromServer, where } from 'firebase/firestore';
-import { db } from '../firebase';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { getDashboard } from '../apiClient';
 
 const Dashboard: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
@@ -13,69 +12,10 @@ const Dashboard: React.FC = () => {
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        const now = new Date();
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const startOfWeek = new Date(startOfDay);
-        startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-        const tsDay = Timestamp.fromDate(startOfDay);
-        const tsWeek = Timestamp.fromDate(startOfWeek);
-        const tsMonth = Timestamp.fromDate(startOfMonth);
-
-        const [totalSnap, hojeSnap, semanaSnap, mesSnap, docsSnap] = await Promise.all([
-          getCountFromServer(collection(db, 'records')),
-          getCountFromServer(query(collection(db, 'records'), where('timestamp', '>=', tsDay))),
-          getCountFromServer(query(collection(db, 'records'), where('timestamp', '>=', tsWeek))),
-          getCountFromServer(query(collection(db, 'records'), where('timestamp', '>=', tsMonth))),
-          getDocs(query(collection(db, 'records'), orderBy('timestamp', 'desc'), limit(500))),
-        ]);
-
-        const realTotal = totalSnap.data().count;
-
-        const bairroCount: Record<string, number> = {};
-        const monthCount: Record<string, number> = {};
-
-        docsSnap.forEach((doc) => {
-          const data = doc.data();
-          const timestamp = (data.timestamp as Timestamp).toDate();
-          const address = data.address || '';
-
-          const parts = address.split(',').map((p: string) => p.trim());
-          if (parts.length >= 3) {
-            let bairro = parts[2];
-            bairro = bairro.split('(')[0].trim();
-            if (bairro && bairro.length < 40) {
-              bairroCount[bairro] = (bairroCount[bairro] || 0) + 1;
-            }
-          }
-
-          const year = timestamp.getFullYear();
-          const month = String(timestamp.getMonth() + 1).padStart(2, '0');
-          const monthKey = `${year}-${month}`;
-          monthCount[monthKey] = (monthCount[monthKey] || 0) + 1;
-        });
-
-        const bairrosArray = Object.keys(bairroCount)
-          .map(name => ({ name, count: bairroCount[name] }))
-          .sort((a, b) => b.count - a.count);
-
-        const sortedMonthKeys = Object.keys(monthCount).sort();
-        const chartData = sortedMonthKeys.slice(-6).map(key => {
-          const [y, m] = key.split('-');
-          const date = new Date(parseInt(y), parseInt(m) - 1, 1);
-          const monthName = date.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' });
-          return { name: monthName.charAt(0).toUpperCase() + monthName.slice(1), total: monthCount[key] };
-        });
-
-        setMetrics({
-          hoje: hojeSnap.data().count,
-          semana: semanaSnap.data().count,
-          mes: mesSnap.data().count,
-          total: realTotal,
-        });
-        setBairros(bairrosArray);
-        setMonthlyData(chartData);
+        const data = await getDashboard();
+        setMetrics(data.metrics);
+        setBairros(data.bairros);
+        setMonthlyData(data.monthly);
       } catch (error) {
         console.error("Erro ao carregar dados da dashboard:", error);
       } finally {

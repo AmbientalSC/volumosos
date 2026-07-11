@@ -28,5 +28,6 @@
     "paths": {
       "@/*" :  ["./*"]
     }
-  }
+  },
+  "exclude": ["node_modules", "server", "android", "dist"]
 }

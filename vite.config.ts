@@ -6,9 +6,11 @@ export default defineConfig(({ mode }) => {
     // Quando gerar build nativo (Capacitor), precisamos de paths relativos para evitar tela branca
     // Use: `vite build --mode native` ou defina VITE_NATIVE=true
     const isNative = mode === 'native' || env.VITE_NATIVE === 'true' || env.CAPACITOR === 'true';
+    // Build para o subdomínio próprio no Coolify (serve da raiz, não de um subpath do GH Pages)
+    const isCoolify = mode === 'coolify' || env.VITE_DEPLOY_TARGET === 'coolify';
     return {
-      // Web (GitHub Pages): '/volumosos/' | Nativo (Capacitor): './'
-      base: isNative ? './' : '/volumosos/',
+      // Web (GitHub Pages): '/volumosos/' | Coolify (domínio próprio): '/' | Nativo (Capacitor): './'
+      base: isNative ? './' : isCoolify ? '/' : '/volumosos/',
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
@@ -26,7 +28,7 @@ export default defineConfig(({ mode }) => {
           output: {
             manualChunks: {
               vendor: ['react', 'react-dom'],
-              firebase: ['firebase/app', 'firebase/firestore', 'firebase/storage', 'firebase/auth'],
+              firebase: ['firebase/app', 'firebase/auth'],
             }
           }
         },
