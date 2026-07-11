@@ -8,8 +8,8 @@ export default async function recordsRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', fastify.verifyFirebaseToken);
 
   fastify.get('/api/records', async (request) => {
-    const { limit } = listRecordsQuerySchema.parse(request.query);
-    return recordsRepository.listRecords(limit);
+    const { page, limit, search, startDate, endDate } = listRecordsQuerySchema.parse(request.query);
+    return recordsRepository.listRecords({ page, limit, search, startDate, endDate });
   });
 
   fastify.post('/api/records/upload-url', async () => {

@@ -10,7 +10,11 @@ export const createRecordSchema = z.object({
 export type CreateRecordInput = z.infer<typeof createRecordSchema>;
 
 export const listRecordsQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(200).default(50),
+  search: z.string().optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
 });
 
 export const exportQuerySchema = z.object({

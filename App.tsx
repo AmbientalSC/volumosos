@@ -4,6 +4,7 @@ import { Geolocation } from '@capacitor/geolocation';
 import { signInAnonymouslyAsync, checkAuthState, auth } from './firebase';
 import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { listRecords, getUploadUrl, createRecord, deleteRecord, exportCsvRows } from './apiClient';
+import type { PaginatedResponse } from './apiClient';
 import { PhotoRecord, PendingRecord } from './types';
 import { loadPendingRecords, savePendingRecord, removePendingRecord, savePendingRecords } from './storage';
 import { CameraIcon, ImageIcon, CloudUploadIcon, XIcon } from './components/Icons';
@@ -17,6 +18,10 @@ const Dashboard = lazy(() => import('./components/Dashboard'));
 const App: React.FC = () => {
   const [records, setRecords] = useState<PhotoRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [totalRecords, setTotalRecords] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastErrorDetails, setLastErrorDetails] = useState<string | null>(null);
@@ -121,15 +126,35 @@ const App: React.FC = () => {
 
   const REALTIME_POLL_INTERVAL_MS = 20000;
 
-  const fetchRecords = useCallback(async () => {
+  const fetchRecords = useCallback(async (page = 1, reset = true) => {
     try {
-      const recordsData = await listRecords(50);
-      setRecords(recordsData);
+      const result = await listRecords({
+        page,
+        limit: 20,
+        search: searchQuery || undefined,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+      });
+      if (reset) {
+        setRecords(result.data);
+      } else {
+        setRecords(prev => [...prev, ...result.data]);
+      }
+      setCurrentPage(page);
+      setHasMore(page < result.pagination.totalPages);
+      setTotalRecords(result.pagination.total);
     } catch (error) {
       console.error("Error fetching records:", error);
-      setError("Não foi possível carregar os registros. Verifique sua conexão.");
+      if (reset) setError("Não foi possível carregar os registros. Verifique sua conexão.");
     }
-  }, []);
+  }, [searchQuery, startDate, endDate]);
+
+  const loadMore = useCallback(async () => {
+    if (isLoadingMore || !hasMore) return;
+    setIsLoadingMore(true);
+    await fetchRecords(currentPage + 1, false);
+    setIsLoadingMore(false);
+  }, [isLoadingMore, hasMore, currentPage, fetchRecords]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -139,11 +164,22 @@ const App: React.FC = () => {
 
     console.log("Usuário autenticado, carregando registros...");
     setIsLoading(true);
-    fetchRecords().finally(() => setIsLoading(false));
+    fetchRecords(1, true).finally(() => setIsLoading(false));
 
-    const interval = setInterval(() => { fetchRecords(); }, REALTIME_POLL_INTERVAL_MS);
+    const interval = setInterval(() => { fetchRecords(1, true); }, REALTIME_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [isAuthenticated, fetchRecords]);
+
+  // Scroll infinito
+  useEffect(() => {
+    const handleScroll = () => {
+      if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 500) {
+        loadMore();
+      }
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [loadMore]);
 
   // Carregar registros pendentes do IndexedDB
   useEffect(() => {
@@ -307,9 +343,7 @@ const App: React.FC = () => {
     };
   }, [isPulling]);
 
-  const filteredRecords = searchQuery
-    ? records.filter(r => r.address.toLowerCase().includes(searchQuery.toLowerCase()))
-    : records;
+  const filteredRecords = records;
 
   // Promise com timeout para evitar travas indefinidas (rede lenta/offline)
   const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
@@ -1066,7 +1100,15 @@ const App: React.FC = () => {
                 type="text"
                 placeholder="Buscar por endereco..."
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
+                  debounceTimeoutRef.current = window.setTimeout(() => {
+                    setCurrentPage(1);
+                    setHasMore(true);
+                    fetchRecords(1, true);
+                  }, 400);
+                }}
                 className="w-full px-4 py-2.5 pl-10 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm bg-white shadow-sm"
               />
               <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

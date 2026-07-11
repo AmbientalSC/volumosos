@@ -20,6 +20,16 @@ export interface RecordDto {
   longitude?: number;
 }
 
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
 function toDto(row: RecordRow): RecordDto {
   return {
     id: row.id,
@@ -31,15 +41,60 @@ function toDto(row: RecordRow): RecordDto {
   };
 }
 
-export async function listRecords(limit: number): Promise<RecordDto[]> {
+interface ListRecordsParams {
+  page: number;
+  limit: number;
+  search?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export async function listRecords(params: ListRecordsParams): Promise<PaginatedResponse<RecordDto>> {
+  const { page, limit, search, startDate, endDate } = params;
+  const conditions: string[] = [];
+  const queryParams: unknown[] = [];
+
+  if (search) {
+    queryParams.push(`%${search}%`);
+    conditions.push(`address ILIKE $${queryParams.length}`);
+  }
+  if (startDate) {
+    queryParams.push(`${startDate}T00:00:00`);
+    conditions.push(`captured_at >= $${queryParams.length}`);
+  }
+  if (endDate) {
+    queryParams.push(`${endDate}T23:59:59.999`);
+    conditions.push(`captured_at <= $${queryParams.length}`);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // Contagem total
+  const countResult = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM ${RECORDS_TABLE} ${where}`,
+    queryParams,
+  );
+  const total = parseInt(countResult.rows[0].count, 10);
+  const totalPages = Math.ceil(total / limit);
+
+  // Dados paginados
+  const offset = (page - 1) * limit;
+  queryParams.push(limit);
+  queryParams.push(offset);
+
   const { rows } = await pool.query<RecordRow>(
     `SELECT id, image_key, address, latitude, longitude, captured_at
      FROM ${RECORDS_TABLE}
+     ${where}
      ORDER BY captured_at DESC
-     LIMIT $1`,
-    [limit]
+     LIMIT $${queryParams.length - 1} OFFSET $${queryParams.length}`,
+    queryParams,
   );
-  return rows.map(toDto);
+
+  return {
+    data: rows.map(toDto),
+    pagination: { page, limit, total, totalPages },
+  };
 }
 
 interface CreateRecordParams {
@@ -101,7 +156,7 @@ export async function exportRecords(start?: string, end?: string): Promise<Expor
     params
   );
 
-  return rows.map((row) => ({
+  return rows.map((row: RecordRow) => ({
     capturedAt: row.captured_at.toISOString(),
     address: row.address,
     imageUrl: toPublicUrl(row.image_key),

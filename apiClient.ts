@@ -3,6 +3,16 @@ import type { PhotoRecord } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
 
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
 interface ApiRecordDto {
   id: string;
   imageUrl: string;
@@ -22,7 +32,7 @@ async function authorizedFetch(path: string, init: RequestInit = {}, retry = tru
     ...init,
     headers: {
       ...(init.headers || {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? { Authorization: *** ${token}` } : {}),
     },
   });
 
@@ -41,10 +51,29 @@ async function parseJsonOrThrow<T>(response: Response, errorMessage: string): Pr
   return response.json() as Promise<T>;
 }
 
-export async function listRecords(limit = 50): Promise<PhotoRecord[]> {
-  const response = await authorizedFetch(`/api/records?limit=${limit}`);
-  const dtos = await parseJsonOrThrow<ApiRecordDto[]>(response, 'Não foi possível carregar os registros.');
-  return dtos.map(toPhotoRecord);
+export interface ListRecordsParams {
+  page?: number;
+  limit?: number;
+  search?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export async function listRecords(params: ListRecordsParams = {}): Promise<PaginatedResponse<PhotoRecord>> {
+  const searchParams = new URLSearchParams();
+  if (params.page) searchParams.set('page', String(params.page));
+  if (params.limit) searchParams.set('limit', String(params.limit));
+  if (params.search) searchParams.set('search', params.search);
+  if (params.startDate) searchParams.set('startDate', params.startDate);
+  if (params.endDate) searchParams.set('endDate', params.endDate);
+
+  const qs = searchParams.toString();
+  const response = await authorizedFetch(`/api/records${qs ? `?${qs}` : ''}`);
+  const data = await parseJsonOrThrow<PaginatedResponse<ApiRecordDto>>(response, 'Não foi possível carregar os registros.');
+  return {
+    ...data,
+    data: data.data.map(toPhotoRecord),
+  };
 }
 
 export async function getUploadUrl(): Promise<{ uploadUrl: string; imageKey: string }> {
