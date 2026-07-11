@@ -6,7 +6,14 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    networks:
+      coolify:
+        aliases:
+          - vol-minio
     volumes:
       - vol-minio-data:/data
 volumes:
   vol-minio-data:
+networks:
+  coolify:
+    external: true
