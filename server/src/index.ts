@@ -17,12 +17,14 @@ await fastify.register(dashboardRoutes);
 fastify.get('/health', async (request, reply) => {
   try {
     await pool.query('SELECT 1');
-  } catch {
+  } catch (err) {
+    request.log.error(err, 'health check: database unreachable');
     return reply.code(503).send({ status: 'error', db: 'down' });
   }
   try {
     await minioClient.bucketExists(BUCKET);
-  } catch {
+  } catch (err) {
+    request.log.error(err, 'health check: storage unreachable');
     return reply.code(503).send({ status: 'error', storage: 'down' });
   }
   return { status: 'ok', db: 'ok', storage: 'ok' };
