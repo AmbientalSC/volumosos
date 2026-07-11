@@ -1008,13 +1008,8 @@ const App: React.FC = () => {
           </Modal>
 
           <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8 pb-24">
-        <div className="bg-white p-4 md:p-6 rounded-xl shadow-lg mb-6 md:mb-8 border border-slate-200">
-          <h2 className="text-lg md:text-xl font-semibold mb-3 md:mb-4 text-center">Adicionar um Novo Registro</h2>
-          <div className="flex justify-center">
-              <button onClick={() => setIsModalOpen(true)} disabled={isSubmitting} className="w-full sm:w-auto flex items-center justify-center gap-2 md:gap-3 px-6 md:px-8 py-3 md:py-4 bg-teal-500 text-white font-bold rounded-lg shadow-lg hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-opacity-75 disabled:bg-teal-300 transition-all duration-300 transform hover:scale-105 text-sm md:text-base"><CameraIcon className="h-5 w-5 md:h-6 md:w-6" /><span>{isSubmitting ? 'Processando...' : 'Adicionar Foto'}</span></button>
-          </div>
-          <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
-          <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
+        <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
+        <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           
           {isSubmitting && (
             <div className="flex flex-col items-center justify-center mt-4 md:mt-6 text-slate-600">
