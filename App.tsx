@@ -1008,8 +1008,8 @@ const App: React.FC = () => {
           </Modal>
 
           <main className="w-full max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8 pb-24">
-        <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
-        <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
+          <input type="file" accept="image/*" capture="environment" ref={fileInputCameraRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
+          <input type="file" accept="image/*" ref={fileInputGalleryRef} onChange={handleFileChange} className="hidden" aria-hidden="true"/>
           
           {isSubmitting && (
             <div className="flex flex-col items-center justify-center mt-4 md:mt-6 text-slate-600">
@@ -1085,7 +1085,6 @@ const App: React.FC = () => {
               </p>
             </div>
           )}
-        </div>
 
         {/* Barra de busca */}
         {records.length > 0 && !isLoading && (
