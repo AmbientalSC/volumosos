@@ -18,7 +18,10 @@ export function toPublicUrl(imageKey: string): string {
 }
 
 export async function getPresignedPutUrl(imageKey: string): Promise<string> {
-  return minioClient.presignedPutObject(BUCKET, imageKey, PRESIGNED_PUT_EXPIRY_SECONDS);
+  const internalBase = `http://${env.MINIO_ENDPOINT}:${env.MINIO_PORT}`;
+  const externalBase = env.MINIO_PUBLIC_BASE_URL;
+  const url = await minioClient.presignedPutObject(BUCKET, imageKey, PRESIGNED_PUT_EXPIRY_SECONDS);
+  return url.replace(internalBase, externalBase);
 }
 
 export async function deleteImage(imageKey: string): Promise<void> {
