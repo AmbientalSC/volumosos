@@ -782,8 +782,8 @@ const App: React.FC = () => {
                 finalAddress = await fetchAddress(record.latitude, record.longitude);
                 console.log(`Endereço obtido via geocoding: ${finalAddress}`);
               } catch (geocodingErr) {
-                console.warn('Geocoding ainda falhou, mantendo coordenadas:', geocodingErr);
-                throw geocodingErr;
+                console.warn('Geocoding falhou, seguindo com coordenadas brutas:', geocodingErr);
+                // Não aborta — mantém o endereço com coordenadas e faz upload mesmo assim
               }
             }
             
